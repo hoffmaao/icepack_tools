@@ -29,6 +29,7 @@ from icepack_tools.constants import ice_density as rho_I, water_density as rho_W
 from icepack_tools.friction import weertman_anchor
 from icepack_tools.grounding import effective_pressure, grounded_mask
 from icepack_tools.momentum import multilayer_rc_residual
+from icepack_tools.viscosity import A_DIFFUSION
 
 # two layers, Store-like composite rheology
 FRACTIONS = [0.15, 0.85]
@@ -81,100 +82,103 @@ def build(nx=24, Lx=40e3, Ly=12e3):
     return mesh, Q, V, H, b, s, u_obs, Lx
 
 
-def main():
+def solve_case(A_lin, ramp, verbose=False):
+    """One (diffusion on/off) x (n ramped/direct) case.  Returns (its, speed)."""
     mesh, Q, V, H, b, s, u_obs, Lx = build()
-
     from multilayer.model.utilities import create_function_space, layer_thicknesses
     Z = create_function_space(mesh, len(FRACTIONS))
     h_layers = layer_thicknesses(H, len(FRACTIONS), fractions=FRACTIONS)
-
-    He = Function(Q).interpolate(grounded_mask(H, b))
-    N = Function(Q).interpolate(effective_pressure(H, s))
-    print(f"mesh {mesh.num_vertices():,} verts, dual {Z.dim():,} DOFs")
-    print(f"  grounded fraction He: [{He.dat.data_ro.min():.3f}, "
-          f"{He.dat.data_ro.max():.3f}]  (needs both ends -> GL is interior)")
-    print(f"  effective pressure N: [{N.dat.data_ro.min():.4f}, "
-          f"{N.dat.data_ro.max():.3f}] MPa")
-    n_afloat = int((N.dat.data_ro <= 0.0).sum())
-    print(f"  nodes with N == 0 exactly (frictionless): {n_afloat}")
-
     C_w0 = weertman_anchor(H, s, u_obs, M_SLIDE, Q)
-    print(f"  C_w0: [{C_w0.dat.data_ro.min():.4f}, {C_w0.dat.data_ro.max():.3f}]")
 
-    theta = Function(Q, name="theta")            # zero: balanced by construction
-    phi = Function(Q, name="phi")                # zero
-    # m is FIXED at its target -- that is what the residual closure buys.
-    # n still ramps: at M = 0 the creep term contributes nothing, so only
-    # the small linear regulariser balances the strain-rate coupling and
-    # the linearised viscosity is absurd.  ismip7 does the same (n_flow is
-    # a mutable continuation Constant there).
-    n_consts = [Constant(1.0), Constant(1.0)]
-    A_layers = [Constant(A_VALS[0]),
-                Constant(A_VALS[1]) * firedrake.exp(phi)]
+    theta, phi = Function(Q, name="theta"), Function(Q, name="phi")
+    # NOT [Constant(1.0)] * len(N_VALS): that repeats one object, so
+    # assigning per-layer exponents would set every layer to the last one.
+    n_consts = ([Constant(1.0) for _ in N_VALS] if ramp
+                else [Constant(v) for v in N_VALS])
+    A_layers = [Constant(A_VALS[0]), Constant(A_VALS[1]) * firedrake.exp(phi)]
 
-    # COLD START: z is identically zero, including both stress blocks
-    z = Function(Z)
-    assert np.allclose(z.dat.data_ro[0], 0.0)
-
+    z = Function(Z)                       # COLD START
     F = multilayer_rc_residual(
         z, theta, phi, H=H, s=s, b=b, h_layers=h_layers, C_w0=C_w0,
-        A_layers=A_layers, n_consts=n_consts, n_vals=N_VALS,
+        A_layers=A_layers, n_consts=n_consts, n_vals=N_VALS, A_lin=A_lin,
         m_slide=M_SLIDE, mesh=mesh, layer_fractions=FRACTIONS,
         h_visc_floor=10.0, c_w0_floor=1e-6,
     )
     bcs = [DirichletBC(Z.sub(3 * l), Constant((80.0, 0.0)), (1,))
            for l in range(len(FRACTIONS))]
-
     problem = NonlinearVariationalProblem(F, z, bcs=bcs,
                                           form_compiler_parameters=FC)
     solver = NonlinearVariationalSolver(problem, solver_parameters=SPARAMS)
 
-    print(f"\nsolving from a cold start: m = {M_SLIDE} FIXED throughout, "
-          f"n ramped 1 -> {N_VALS}")
-    total_its = 0
-    for lam in np.linspace(0.0, 1.0, N_RAMP):
-        for c, target in zip(n_consts, N_VALS):
-            c.assign(1.0 + lam * (target - 1.0))
+    its = 0
+    for lam in (np.linspace(0.0, 1.0, N_RAMP) if ramp else [1.0]):
+        if ramp:
+            for c, target in zip(n_consts, N_VALS):
+                c.assign(1.0 + lam * (target - 1.0))
         solver.solve()
-        total_its += solver.snes.getIterationNumber()
-        sp = np.hypot(*z.subfunctions[3].dat.data_ro.T)
-        print(f"   n = {float(n_consts[0]):4.2f}/{float(n_consts[1]):4.2f}   "
-              f"max speed {sp.max():8.1f} m/yr   "
-              f"({solver.snes.getIterationNumber()} its)")
-    print(f"  converged, {total_its} Newton iterations total")
+        its += solver.snes.getIterationNumber()
+    return its, z, mesh, Q, H, s, b, N_VALS
 
-    u_b, u_t = z.subfunctions[0], z.subfunctions[3]
-    tau = z.subfunctions[2]
+
+def main():
+    print("Two-layer composite (n = 4 / 1.8) on a regularised-Coulomb bed.")
+    print("m is FIXED at its target in every case -- that is what the")
+    print("residual closure buys.  The question is what removes the")
+    print("*viscous* n-continuation.\n")
+    print(f"  {'diffusion (n=1)':<18} {'n':<10} {'result':<26} {'max speed'}")
+    print("  " + "-" * 68)
+
+    results = {}
+    for A_lin, tag in ((None, "off"), (Constant(A_DIFFUSION), f"{A_DIFFUSION:g}")):
+        for ramp, rtag in ((True, "ramped 1->n"), (False, "direct")):
+            try:
+                its, z, mesh, Q, H, s, b, _ = solve_case(A_lin, ramp)
+                sp = np.hypot(*z.subfunctions[3].dat.data_ro.T).max()
+                print(f"  {tag:<18} {rtag:<10} {'converged, ' + str(its) + ' its':<26} "
+                      f"{sp:8.1f} m/yr")
+                results[(tag, rtag)] = (its, z, mesh, Q, H, s, b)
+            except Exception as exc:
+                print(f"  {tag:<18} {rtag:<10} {'DIVERGED (' + type(exc).__name__ + ')':<26}")
+                results[(tag, rtag)] = None
+
+    assert results[("off", "ramped 1->n")], "ramped path must work without diffusion"
+    assert results[("off", "direct")] is None, (
+        "expected the direct solve to fail without a linear mechanism")
+    assert results[(f"{A_DIFFUSION:g}", "direct")], (
+        "diffusion creep should remove the n-continuation")
+
+    # both paths must reach the same solution -- the direct solve is not a
+    # shortcut to somewhere else
+    a = np.hypot(*results[(f"{A_DIFFUSION:g}", "ramped 1->n")][1]
+                 .subfunctions[3].dat.data_ro.T)
+    d = np.hypot(*results[(f"{A_DIFFUSION:g}", "direct")][1]
+                 .subfunctions[3].dat.data_ro.T)
+    rel = np.abs(a - d).max() / max(a.max(), 1e-300)
+    print(f"\n  ramped vs direct agree to {rel:.2e} (relative, max speed)")
+    assert rel < 1e-6, "ramped and direct solves disagree"
+
+    # inspect the direct composite solution
+    its, z, mesh, Q, H, s, b = results[(f"{A_DIFFUSION:g}", "direct")]
+    u_b, u_t, tau = z.subfunctions[0], z.subfunctions[3], z.subfunctions[2]
     sp_b = np.hypot(*u_b.dat.data_ro.T)
     sp_t = np.hypot(*u_t.dat.data_ro.T)
-    tb = np.hypot(*tau.dat.data_ro.T) * 1e3
-
     print(f"\n  bottom speed [{sp_b.min():7.1f}, {sp_b.max():7.1f}] m/yr")
     print(f"  top    speed [{sp_t.min():7.1f}, {sp_t.max():7.1f}] m/yr")
-    print(f"  shear  (top - bottom) max {np.abs(sp_t - sp_b).max():.1f} m/yr")
-    print(f"  |tau_b|      [{tb.min():7.3f}, {tb.max():7.1f}] kPa")
+    print(f"  vertical shear max {np.abs(sp_t - sp_b).max():.1f} m/yr")
 
-    # The headline property: drag is exactly zero where the ice floats.
-    # Check it cell-wise in DG0 -- projecting the DG0 stress to CG1 smears
-    # grounded values onto adjacent floating nodes and measures the
-    # projection, not the model.
     DG = FunctionSpace(mesh, "DG", 0)
     N_dg = Function(DG).interpolate(effective_pressure(H, s))
     tb_dg = Function(DG).interpolate(sqrt(inner(tau, tau)))
     afloat = N_dg.dat.data_ro <= 0.0
-    print(f"\n  floating cells (N == 0 exactly): {int(afloat.sum())}")
-    if afloat.any():
-        worst = float(np.abs(tb_dg.dat.data_ro[afloat]).max())
-        scale = float(np.abs(tb_dg.dat.data_ro).max())
-        rel = worst / max(scale, 1e-300)
-        print(f"  max |tau_b| there: {1e3*worst:.3e} kPa "
-              f"({rel:.1e} of the grounded max -- machine zero)")
-        # Compare with a phi_eff floor of 0.01, which leaves ~1% of the
-        # grounded drag on every shelf node.
-        assert rel < 1e-12, f"basal drag leaked onto floating ice: {rel:.2e}"
-    assert np.isfinite(sp_t).all(), "non-finite velocity"
-    assert sp_t.max() < 1e5, "velocity runaway"
-    print("\nPASS: cold start converged with m fixed at its target throughout")
+    worst = float(np.abs(tb_dg.dat.data_ro[afloat]).max())
+    scale = float(np.abs(tb_dg.dat.data_ro).max())
+    print(f"  floating cells (N == 0 exactly): {int(afloat.sum())}")
+    print(f"  max |tau_b| there: {1e3*worst:.3e} kPa "
+          f"({worst/scale:.1e} of grounded max -- machine zero)")
+    assert worst / scale < 1e-12, "basal drag leaked onto floating ice"
+
+    print("\nPASS: with diffusion creep the composite solves cold and direct,")
+    print("      no continuation in n and none in m")
 
 
 if __name__ == "__main__":

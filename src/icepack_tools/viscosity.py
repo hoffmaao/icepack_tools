@@ -42,6 +42,15 @@ ALPHA = 1e-4
 #: Reference thickness for the linear regulariser [m].
 H_REF = 100.0
 
+#: Diffusion-creep (n = 1) prefactor [MPa^-1 yr^-1].  A *physical*
+#: mechanism in parallel with dislocation creep, not a numerical device:
+#: Goldsby & Kohlstedt's composite makes Glen's n = 3 an effective average
+#: of several mechanisms, and the Thwaites multilayer runs carry this same
+#: value.  It happens to condition the dual system too -- being n = 1 its
+#: Hessian contribution is constant and non-zero at M = 0, which is worth
+#: ~3 orders of magnitude over the alpha-weighted regulariser alone.
+A_DIFFUSION = 1e-3
+
 #: Floor added inside the stress invariants, in MPa^2, i.e. a ~1 kPa stress
 #: floor.  Needed because :math:`(M^2)^{(n-1)/2}` has derivative
 #: :math:`\propto (M^2)^{(n-3)/2}`, which for :math:`n < 3` **diverges** at
@@ -63,9 +72,10 @@ def second_invariant(M, d=2):
     return (inner(M, M) - tr(M) ** 2 / (d + 1)) / 2
 
 
-def membrane_residual(M, Mt, u, h, A, n, *, n_val=None, tau_c=TAU_C,
-                      alpha=ALPHA, H_ref=H_REF, d=2, h_floor=0.0,
-                      extra_linear=None, stress_eps=STRESS_EPS):
+def membrane_residual(M, Mt, u, h, A, n, *, A_lin=None, n_val=None,
+                      tau_c=TAU_C, alpha=ALPHA, H_ref=H_REF, d=2,
+                      h_floor=0.0, extra_linear=None,
+                      stress_eps=STRESS_EPS):
     r"""Composite flow law plus strain-rate coupling, in residual form.
 
     Returns the ``M``-block of the dual residual:
@@ -112,13 +122,19 @@ def membrane_residual(M, Mt, u, h, A, n, *, n_val=None, tau_c=TAU_C,
     linear = H_ref * A * Constant(tau_c) ** (n_val - 1) * dev
     F = (h_v * A * Mn * dev + Constant(alpha) * linear
          - h_v * inner(sym(grad(u)), Mt)) * dx
+    if A_lin is not None:
+        # Diffusion creep, n = 1, at the LAYER thickness -- a mechanism in
+        # parallel with the creep term, so it carries h and vanishes with
+        # the ice.  Distinct from the alpha/H_ref regulariser above, which
+        # exists only to keep the block positive-definite as h -> 0.
+        F += h_v * A_lin * dev * dx
     if extra_linear is not None:
         F += extra_linear * linear * dx
     return F
 
 
 def interlayer_residual(S, sigma, u_above, u_below, h_above, h_below, A, n,
-                        *, n_val=None, tau_c=TAU_C, alpha=ALPHA,
+                        *, A_lin=None, n_val=None, tau_c=TAU_C, alpha=ALPHA,
                         stress_eps=STRESS_EPS):
     r"""Interlayer shear closure with the same linear regularisation.
 
@@ -135,6 +151,9 @@ def interlayer_residual(S, sigma, u_above, u_below, h_above, h_below, A, n,
     n_val = float(n) if n_val is None else n_val
     S2 = inner(S, S) + Constant(stress_eps)
     Sn = conditional(eq(n, 1), Constant(1.0), S2 ** ((n - 1) / 2))
-    A_lin = A * Constant(tau_c) ** (n_val - 1)
+    A_reg = A * Constant(tau_c) ** (n_val - 1)
+    creep = A * Sn + Constant(alpha) * A_reg
+    if A_lin is not None:
+        creep = creep + A_lin          # diffusion, n = 1, in parallel
     du = (u_above - u_below) / (h_above + h_below)
-    return inner((A * Sn + Constant(alpha) * A_lin) * S - du, sigma) * dx
+    return inner(creep * S - du, sigma) * dx

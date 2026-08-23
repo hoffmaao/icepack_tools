@@ -79,7 +79,8 @@ def calving_terminus(u, v, H, s, outflow_ids, layer_fraction=1.0):
 def multilayer_rc_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
                            A_layers, n_consts, n_vals, m_slide, mesh,
                            layer_fractions=None, tau_c=0.1, alpha=1e-4,
-                           H_ref=100.0, c0=0.5, u_min=1.0, eps_tauc=0.0,
+                           H_ref=100.0, A_lin=None, c0=0.5, u_min=1.0,
+                           eps_tauc=0.0,
                            c_w0_floor=0.0, h_visc_floor=0.0, alpha_gl=0.0,
                            ocean_drag_coeff=0.0, h_ocean=10.0,
                            u_lim=0.0, k_lim=1e-3, gl_width=10.0,
@@ -129,7 +130,8 @@ def multilayer_rc_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
 
         term = membrane_residual(
             M_l, Mt_l, u_l, h_l, A_layers[l], n_consts[l], n_val=n_vals[l],
-            tau_c=tau_c, alpha=alpha, H_ref=H_ref, h_floor=h_visc_floor,
+            A_lin=A_lin, tau_c=tau_c, alpha=alpha, H_ref=H_ref,
+            h_floor=h_visc_floor,
             extra_linear=(Constant(alpha_gl) * (Constant(1.0) - He)
                           if alpha_gl > 0 else None),
         )
@@ -165,6 +167,6 @@ def multilayer_rc_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
             u_above=fields[3 * l], u_below=fields[3 * (l - 1)],
             h_above=h_layers[l], h_below=h_layers[l - 1],
             A=A_layers[l - 1], n=n_consts[l - 1], n_val=n_vals[l - 1],
-            tau_c=tau_c, alpha=alpha,
+            A_lin=A_lin, tau_c=tau_c, alpha=alpha,
         )
     return F

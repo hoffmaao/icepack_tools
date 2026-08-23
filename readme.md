@@ -37,19 +37,37 @@ F      += inner(tau + tau_b u / |u|_reg, sigma) dx   identity tau-block
 makes that block the identity -- perfectly conditioned at `tau = 0` -- and
 the blend is smooth everywhere, so **no continuation in `m` is needed**.
 
-The flow-law exponents `n` still need one.  At `M = 0` the creep term
-contributes nothing, so only the small linear regulariser balances the
-strain-rate coupling and the linearised viscosity is absurd; ramping
-`n: 1 -> n` fixes that, and `n_consts` are mutable `Constant`s for exactly
-this.  `test/multilayer_rc_test.py` demonstrates the split: a two-layer
-`n = 4 / 1.8` composite on a Coulomb bed, cold start `z = 0`, **`m = 3`
-fixed throughout**, `n` ramped in 6 steps -- 42 Newton iterations total,
-6-8 per step.
+The flow-law exponents `n` need one *unless* the composite carries a real
+linear mechanism.  At `M = 0` the creep term contributes nothing, so if
+the only other term is the small `alpha` regulariser the linearised
+viscosity is absurd and Newton diverges.  Adding **diffusion creep**
+(`n = 1`, `A_lin ~ 1e-3` MPa⁻¹ yr⁻¹) in parallel with dislocation creep
+fixes it -- and it is a physical mechanism, not a numerical device:
+Goldsby & Kohlstedt's composite makes Glen's `n = 3` an effective average
+of several mechanisms, and the Thwaites multilayer runs carry this same
+term.
 
-That test also checks the headline property directly: on the 296 cells
-where `N == 0` exactly, `|tau_b|` comes out at 5.3e-15 kPa, i.e. 1.8e-17
-of the grounded maximum -- machine zero, against the ~1 % of grounded drag
-that a `phi_eff` floor of 0.01 leaves on every shelf node.
+`test/multilayer_rc_test.py` isolates what each ingredient buys.  Two-layer
+`n = 4 / 1.8` composite on a Coulomb bed, cold start `z = 0`, `m = 3`
+fixed at its target in every case:
+
+| diffusion (n=1) | n | result | max speed |
+|---|---|---|---|
+| off | ramped 1 -> n | converged, 42 its | 1132.5 m/yr |
+| off | **direct** | **diverges** | -- |
+| 1e-3 | ramped 1 -> n | converged, 41 its | 1136.1 m/yr |
+| 1e-3 | **direct** | **converged, 46 its** | 1136.1 m/yr |
+
+So: the residual friction closure removes the `m`-continuation, and
+diffusion creep removes the `n`-continuation.  Together **the whole
+continuation apparatus disappears** -- one cold solve replaces a staged
+ramp.  The ramped and direct paths agree to 7.9e-12, so the direct solve
+is not converging somewhere else.
+
+The test also checks the headline property directly: on the 296 cells
+where `N == 0` exactly, `|tau_b|` is 5.3e-15 kPa, i.e. 1.8e-17 of the
+grounded maximum -- machine zero, against the ~1 % of grounded drag that a
+`phi_eff` floor of 0.01 leaves on every shelf node.
 
 ## What this buys
 
