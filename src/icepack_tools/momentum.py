@@ -36,7 +36,7 @@ from .viscosity import membrane_residual, interlayer_residual
 
 def momentum_residual(u, v, M, h, s, H, mesh, *, tau=None, stress_above=None,
                       stress_below=None, h_floor=0.0, rho_I=ice_density,
-                      g=gravity, layer_fraction=1.0):
+                      g=gravity):
     r"""One layer's momentum balance, in residual form.
 
     ``tau`` is the basal stress (bottom layer only), ``stress_above`` and
@@ -45,10 +45,16 @@ def momentum_residual(u, v, M, h, s, H, mesh, *, tau=None, stress_above=None,
 
     ``H`` is the *total* column thickness, used for the driving stress;
     ``h`` is this layer's share, used for the membrane coupling.
+
+    There is deliberately no ``layer_fraction`` here, unlike in
+    ``calving_terminus``: this layer's share of the driving stress is
+    already carried by ``h``, its own thickness, so scaling by a layer
+    fraction on top would double-count it.  The back-pressure in
+    ``calving_terminus`` does need one, because it goes as the total
+    column ``H`` squared and has to be split across layers explicitly.
     """
     h_v = max_value(h, Constant(h_floor)) if h_floor else h
     nu = FacetNormal(mesh)
-    lf = Constant(layer_fraction)
 
     F = (-h_v * inner(M, sym(grad(v)))
          - rho_I * g * h * inner(grad(s), v)) * dx
@@ -165,7 +171,7 @@ def multilayer_rc_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
     F = None
     for l in range(num_layers):
         u_l, M_l, S_l = fields[3 * l], fields[3 * l + 1], fields[3 * l + 2]
-        v_l, Mt_l, sig_l = tests[3 * l], tests[3 * l + 1], tests[3 * l + 2]
+        v_l, Mt_l, _ = tests[3 * l], tests[3 * l + 1], tests[3 * l + 2]
         h_l = h_layers[l]
 
         term = membrane_residual(
