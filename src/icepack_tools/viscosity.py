@@ -12,21 +12,40 @@ a **constant** reference thickness:
 
 .. math::
     P = \underbrace{2h\,\frac{A}{n+1}|M_{\rm dev}|^{n+1}}_{\text{creep}}
-      + \alpha\,\underbrace{2H_{\rm ref}\,\frac{A_{\rm lin}}{2}|M_{\rm dev}|^2}_{\text{regulariser}},
-    \qquad A_{\rm lin} = A\,\tau_c^{\,n-1}
+      + \alpha\,\underbrace{2H_{\rm ref}\,\frac{A_{\rm reg}}{2}|M_{\rm dev}|^2}_{\text{regulariser}},
+    \qquad A_{\rm reg} = A\,\tau_c^{\,n-1}
 
 The linear term is positive-definite in :math:`M` for any :math:`A > 0`,
 so it keeps the block non-singular at zero stress; and because it uses
 :math:`H_{\rm ref}` rather than :math:`h`, it stays positive-definite as
-:math:`h \to 0`.  Stress-matching through :math:`A_{\rm lin} = A\tau_c^{n-1}`
+:math:`h \to 0`.  Stress-matching through :math:`A_{\rm reg} = A\tau_c^{n-1}`
 makes the two mechanisms agree at :math:`|M_{\rm dev}| = \tau_c`, so
 :math:`\alpha` sets how much regularisation is added relative to the real
 rheology at the reference stress.
 
-This is the same composite the ismip7 and peninsula inversions use.  The
-residual form below is the ``M``-stationarity of that potential together
-with the strain-rate coupling, written directly so it can be assembled
-alongside a residual-form friction closure.
+Separately, and **not** to be confused with :math:`A_{\rm reg}`, the
+closures take an optional diffusion-creep prefactor ``A_lin``: a genuine
+:math:`n = 1` mechanism acting in parallel with dislocation creep, at the
+**layer** thickness,
+
+.. math::
+    A|M_{\rm dev}|^{n-1}M_{\rm dev} \;\longrightarrow\;
+    \left(A|M_{\rm dev}|^{n-1} + A_{\rm lin}\right) M_{\rm dev}
+
+The two are deliberately distinct.  :math:`A_{\rm reg}` is a numerical
+device scaled by a tiny :math:`\alpha` at a constant :math:`H_{\rm ref}`,
+whose only job is to keep the membrane block positive-definite as
+:math:`h \to 0`.  ``A_lin`` is physics: Goldsby & Kohlstedt's composite
+makes Glen's :math:`n = 3` an effective average over several mechanisms,
+so ``A_lin`` carries :math:`h` and vanishes with the ice like any real
+deformation term.  Both belong; neither replaces the other.
+
+That creep-plus-regulariser potential :math:`P` -- without ``A_lin`` --
+is the same composite the ismip7 and peninsula inversions use.  The
+residual form below is its ``M``-stationarity together with the
+strain-rate coupling, written directly so it can be assembled alongside a
+residual-form friction closure, with the optional diffusion term added to
+that residual.
 """
 
 from firedrake import (
@@ -41,6 +60,15 @@ ALPHA = 1e-4
 
 #: Reference thickness for the linear regulariser [m].
 H_REF = 100.0
+
+#: Diffusion-creep (n = 1) prefactor [MPa^-1 yr^-1].  A *physical*
+#: mechanism in parallel with dislocation creep, not a numerical device:
+#: Goldsby & Kohlstedt's composite makes Glen's n = 3 an effective average
+#: of several mechanisms, and the Thwaites multilayer runs carry this same
+#: value.  It happens to condition the dual system too -- being n = 1 its
+#: Hessian contribution is constant and non-zero at M = 0, which is worth
+#: ~3 orders of magnitude over the alpha-weighted regulariser alone.
+A_DIFFUSION = 1e-3
 
 #: Floor added inside the stress invariants, in MPa^2, i.e. a ~1 kPa stress
 #: floor.  Needed because :math:`(M^2)^{(n-1)/2}` has derivative
@@ -63,15 +91,17 @@ def second_invariant(M, d=2):
     return (inner(M, M) - tr(M) ** 2 / (d + 1)) / 2
 
 
-def membrane_residual(M, Mt, u, h, A, n, *, n_val=None, tau_c=TAU_C,
-                      alpha=ALPHA, H_ref=H_REF, d=2, h_floor=0.0,
-                      extra_linear=None, stress_eps=STRESS_EPS):
+def membrane_residual(M, Mt, u, h, A, n, *, A_lin=None, n_val=None,
+                      tau_c=TAU_C, alpha=ALPHA, H_ref=H_REF, d=2,
+                      h_floor=0.0, extra_linear=None,
+                      stress_eps=STRESS_EPS):
     r"""Composite flow law plus strain-rate coupling, in residual form.
 
     Returns the ``M``-block of the dual residual:
 
     .. math::
-        \int h A |M_{\rm dev}|^{n-1} M_{\rm dev}\!:\!M_t
+        \int h \left(A |M_{\rm dev}|^{n-1} + A_{\rm lin}\right)
+               M_{\rm dev}\!:\!M_t
         + \alpha H_{\rm ref} A \tau_c^{\,n-1} M_{\rm dev}\!:\!M_t
         - h\,\varepsilon(u)\!:\!M_t \; dx
 
@@ -87,6 +117,16 @@ def membrane_residual(M, Mt, u, h, A, n, *, n_val=None, tau_c=TAU_C,
         Rate factor, e.g. ``A0 * exp(phi)`` with ``phi`` a log control.
     n : Constant
         Flow-law exponent.  Mutable, so it can be ramped 1 -> ``n_val``.
+    A_lin : UFL expression, optional
+        Diffusion-creep (:math:`n = 1`) prefactor, in parallel with
+        dislocation creep and carrying the **layer** thickness, so it
+        vanishes with the ice.  ``None`` (the default) leaves diffusion
+        creep out entirely.  See :data:`A_DIFFUSION` for a typical value.
+        Distinct from the ``alpha``/``H_ref`` regulariser, whose
+        prefactor is :math:`A_{\rm reg} = A\tau_c^{n-1}`: that one is a
+        numerical device at a *constant* reference thickness.  Note that
+        ``A_lin`` is deliberately not scaled by the inverted log-fluidity
+        the way ``A`` usually is -- see ``multilayer_rc_residual``.
     n_val : float, optional
         The *final* exponent, used to fix the stress-matching power
         :math:`\tau_c^{n-1}` so the regulariser does not move during an
@@ -112,29 +152,45 @@ def membrane_residual(M, Mt, u, h, A, n, *, n_val=None, tau_c=TAU_C,
     linear = H_ref * A * Constant(tau_c) ** (n_val - 1) * dev
     F = (h_v * A * Mn * dev + Constant(alpha) * linear
          - h_v * inner(sym(grad(u)), Mt)) * dx
+    if A_lin is not None:
+        # Diffusion creep, n = 1, at the LAYER thickness -- a mechanism in
+        # parallel with the creep term, so it carries h and vanishes with
+        # the ice.  Distinct from the alpha/H_ref regulariser above, which
+        # exists only to keep the block positive-definite as h -> 0.
+        F += h_v * A_lin * dev * dx
     if extra_linear is not None:
         F += extra_linear * linear * dx
     return F
 
 
 def interlayer_residual(S, sigma, u_above, u_below, h_above, h_below, A, n,
-                        *, n_val=None, tau_c=TAU_C, alpha=ALPHA,
+                        *, A_lin=None, n_val=None, tau_c=TAU_C, alpha=ALPHA,
                         stress_eps=STRESS_EPS):
     r"""Interlayer shear closure with the same linear regularisation.
 
     The multilayer interlayer stress obeys
 
-    .. math::  A|S|^{n-1}S = \frac{u^{l+1} - u^l}{h^{l+1} + h^l}
+    .. math::
+        \left(A|S|^{n-1} + \alpha A\tau_c^{\,n-1} + A_{\rm lin}\right) S
+        = \frac{u^{l+1} - u^l}{h^{l+1} + h^l}
 
     whose Jacobian shares the :math:`|S|^{n-1}` degeneracy at ``S = 0``.
     The regulariser is stress-matched the same way.  Unlike the membrane
     term this one needs no reference thickness: the layer thicknesses
     appear in the velocity-jump normalisation, not as a prefactor that can
     vanish.
+
+    ``A_lin`` is the optional diffusion-creep (:math:`n = 1`) prefactor,
+    the same mechanism ``membrane_residual`` takes and again distinct from
+    the stress-matched regulariser :math:`A_{\rm reg} = A\tau_c^{n-1}`.
+    ``None`` (the default) leaves it out.
     """
     n_val = float(n) if n_val is None else n_val
     S2 = inner(S, S) + Constant(stress_eps)
     Sn = conditional(eq(n, 1), Constant(1.0), S2 ** ((n - 1) / 2))
-    A_lin = A * Constant(tau_c) ** (n_val - 1)
+    A_reg = A * Constant(tau_c) ** (n_val - 1)
+    creep = A * Sn + Constant(alpha) * A_reg
+    if A_lin is not None:
+        creep = creep + A_lin          # diffusion, n = 1, in parallel
     du = (u_above - u_below) / (h_above + h_below)
-    return inner((A * Sn + Constant(alpha) * A_lin) * S - du, sigma) * dx
+    return inner(creep * S - du, sigma) * dx

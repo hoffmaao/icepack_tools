@@ -36,7 +36,7 @@ from .viscosity import membrane_residual, interlayer_residual
 
 def momentum_residual(u, v, M, h, s, H, mesh, *, tau=None, stress_above=None,
                       stress_below=None, h_floor=0.0, rho_I=ice_density,
-                      g=gravity, layer_fraction=1.0):
+                      g=gravity):
     r"""One layer's momentum balance, in residual form.
 
     ``tau`` is the basal stress (bottom layer only), ``stress_above`` and
@@ -45,10 +45,16 @@ def momentum_residual(u, v, M, h, s, H, mesh, *, tau=None, stress_above=None,
 
     ``H`` is the *total* column thickness, used for the driving stress;
     ``h`` is this layer's share, used for the membrane coupling.
+
+    There is deliberately no ``layer_fraction`` here, unlike in
+    ``calving_terminus``: this layer's share of the driving stress is
+    already carried by ``h``, its own thickness, so scaling by a layer
+    fraction on top would double-count it.  The back-pressure in
+    ``calving_terminus`` does need one, because it goes as the total
+    column ``H`` squared and has to be split across layers explicitly.
     """
     h_v = max_value(h, Constant(h_floor)) if h_floor else h
     nu = FacetNormal(mesh)
-    lf = Constant(layer_fraction)
 
     F = (-h_v * inner(M, sym(grad(v)))
          - rho_I * g * h * inner(grad(s), v)) * dx
@@ -79,7 +85,8 @@ def calving_terminus(u, v, H, s, outflow_ids, layer_fraction=1.0):
 def multilayer_rc_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
                            A_layers, n_consts, n_vals, m_slide, mesh,
                            layer_fractions=None, tau_c=0.1, alpha=1e-4,
-                           H_ref=100.0, c0=0.5, u_min=1.0, eps_tauc=0.0,
+                           H_ref=100.0, A_lin_layers=None, c0=0.5, u_min=1.0,
+                           eps_tauc=0.0,
                            c_w0_floor=0.0, h_visc_floor=0.0, alpha_gl=0.0,
                            ocean_drag_coeff=0.0, h_ocean=10.0,
                            u_lim=0.0, k_lim=1e-3, gl_width=10.0,
@@ -103,19 +110,59 @@ def multilayer_rc_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
         Log fluidity adjustment.  Applied to the layers flagged in
         ``A_layers`` by passing an already-scaled expression.
 
+    Other Parameters
+    ----------------
+    A_lin_layers : sequence, optional
+        Per-layer diffusion-creep (:math:`n = 1`) prefactors, one entry
+        per layer, alongside ``A_layers``/``n_consts``/``n_vals``.
+        ``None`` (the default) turns diffusion creep off everywhere; an
+        individual entry may be ``None`` to disable it for that layer.
+        Layer ``l``'s membrane closure takes ``A_lin_layers[l]``; the
+        closure on interface ``l`` takes ``A_lin_layers[l - 1]``, the
+        layer *below* the interface, matching the ``A_layers[l - 1]``
+        convention already used there.
+
+        Per-layer because diffusion creep's prefactor depends on
+        temperature and grain size, so a warm basal layer and a cold
+        surface layer want different values.
+
+        These prefactors are **not** multiplied by ``exp(phi)``.
+        Diffusion creep is treated as a fixed physical mechanism whose
+        prefactor is prescribed rather than inferred; the inverted
+        log-fluidity ``phi`` deliberately controls only the
+        dislocation-creep component.  The consequence is worth stating
+        plainly: at low deviatoric stress diffusion carries a large share
+        of the effective fluidity, and ``phi`` cannot adjust that share.
+        In this package's convention, for the ``n = 4``, ``A = 46`` layer
+        with ``A_lin = 1e-3``, diffusion is 98 % of the effective-fluidity
+        bracket at 10 kPa, 80 % at 25 kPa, 33 % at 50 kPa and 6 % at
+        100 kPa; for an ``n = 1.8``, ``A = 0.451`` layer it is 10 % at
+        10 kPa falling to 2 % at 100 kPa.
+
     Notes
     -----
     Every block is closed in residual form, so the Jacobian is
     non-singular at zero stress and no continuation in ``m`` is needed.
-    The flow-law exponents ``n_consts`` are still mutable Constants so the
-    *viscous* exponents can be ramped; ``n_vals`` fixes the stress-matching
-    powers so the linear regulariser does not move during that ramp.
+    With ``A_lin_layers`` set, the :math:`n = 1` diffusion term leaves a
+    constant, non-zero Hessian contribution at ``M = 0``, so no
+    continuation in ``n`` is needed either: ``n_consts`` may be set
+    straight to their targets and the whole staged ramp disappears.  They
+    stay mutable Constants because an n-ramp is still *required* when
+    diffusion creep is off, and ``n_vals`` fixes the stress-matching
+    powers so the linear regulariser does not move during such a ramp.
     """
     from .grounding import grounded_mask
 
     num_layers = len(h_layers)
     if layer_fractions is None:
         layer_fractions = [1.0 / num_layers] * num_layers
+    if A_lin_layers is None:
+        A_lin_layers = [None] * num_layers
+    elif len(A_lin_layers) != num_layers:
+        raise ValueError(
+            f"A_lin_layers has {len(A_lin_layers)} entries, expected one per "
+            f"layer ({num_layers})"
+        )
 
     fields = split(z)
     tests = split(TestFunction(z.function_space()))
@@ -124,12 +171,13 @@ def multilayer_rc_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
     F = None
     for l in range(num_layers):
         u_l, M_l, S_l = fields[3 * l], fields[3 * l + 1], fields[3 * l + 2]
-        v_l, Mt_l, sig_l = tests[3 * l], tests[3 * l + 1], tests[3 * l + 2]
+        v_l, Mt_l, _ = tests[3 * l], tests[3 * l + 1], tests[3 * l + 2]
         h_l = h_layers[l]
 
         term = membrane_residual(
             M_l, Mt_l, u_l, h_l, A_layers[l], n_consts[l], n_val=n_vals[l],
-            tau_c=tau_c, alpha=alpha, H_ref=H_ref, h_floor=h_visc_floor,
+            A_lin=A_lin_layers[l], tau_c=tau_c, alpha=alpha, H_ref=H_ref,
+            h_floor=h_visc_floor,
             extra_linear=(Constant(alpha_gl) * (Constant(1.0) - He)
                           if alpha_gl > 0 else None),
         )
@@ -165,6 +213,6 @@ def multilayer_rc_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
             u_above=fields[3 * l], u_below=fields[3 * (l - 1)],
             h_above=h_layers[l], h_below=h_layers[l - 1],
             A=A_layers[l - 1], n=n_consts[l - 1], n_val=n_vals[l - 1],
-            tau_c=tau_c, alpha=alpha,
+            A_lin=A_lin_layers[l - 1], tau_c=tau_c, alpha=alpha,
         )
     return F
