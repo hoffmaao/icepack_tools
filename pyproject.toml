@@ -1,0 +1,16 @@
+[project]
+name = "icepack_tools"
+version = "0.1.0"
+authors = [
+    { name = "Andrew Hoffman", email = "hoffmaao@uw.edu" },
+]
+description = "Residual-form building blocks for icepack2 dual ice-flow models"
+license = { text = "GPL-3.0-or-later" }
+requires-python = ">=3.8"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
