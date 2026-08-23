@@ -40,10 +40,12 @@ makes Glen's :math:`n = 3` an effective average over several mechanisms,
 so ``A_lin`` carries :math:`h` and vanishes with the ice like any real
 deformation term.  Both belong; neither replaces the other.
 
-This is the same composite the ismip7 and peninsula inversions use.  The
-residual form below is the ``M``-stationarity of that potential together
-with the strain-rate coupling, written directly so it can be assembled
-alongside a residual-form friction closure.
+That creep-plus-regulariser potential :math:`P` -- without ``A_lin`` --
+is the same composite the ismip7 and peninsula inversions use.  The
+residual form below is its ``M``-stationarity together with the
+strain-rate coupling, written directly so it can be assembled alongside a
+residual-form friction closure, with the optional diffusion term added to
+that residual.
 """
 
 from firedrake import (

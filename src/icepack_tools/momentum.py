@@ -137,9 +137,13 @@ def multilayer_rc_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
     -----
     Every block is closed in residual form, so the Jacobian is
     non-singular at zero stress and no continuation in ``m`` is needed.
-    The flow-law exponents ``n_consts`` are still mutable Constants so the
-    *viscous* exponents can be ramped; ``n_vals`` fixes the stress-matching
-    powers so the linear regulariser does not move during that ramp.
+    With ``A_lin_layers`` set, the :math:`n = 1` diffusion term leaves a
+    constant, non-zero Hessian contribution at ``M = 0``, so no
+    continuation in ``n`` is needed either: ``n_consts`` may be set
+    straight to their targets and the whole staged ramp disappears.  They
+    stay mutable Constants because an n-ramp is still *required* when
+    diffusion creep is off, and ``n_vals`` fixes the stress-matching
+    powers so the linear regulariser does not move during such a ramp.
     """
     from .grounding import grounded_mask
 
