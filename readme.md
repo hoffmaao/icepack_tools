@@ -39,13 +39,22 @@ the blend is smooth everywhere, so **no continuation in `m` is needed**.
 
 The flow-law exponents `n` need one *unless* the composite carries a real
 linear mechanism.  At `M = 0` the creep term contributes nothing, so if
-the only other term is the small `alpha` regulariser the linearised
-viscosity is absurd and Newton diverges.  Adding **diffusion creep**
-(`n = 1`, `A_lin ~ 1e-3` MPa⁻¹ yr⁻¹) in parallel with dislocation creep
-fixes it -- and it is a physical mechanism, not a numerical device:
-Goldsby & Kohlstedt's composite makes Glen's `n = 3` an effective average
-of several mechanisms, and the Thwaites multilayer runs carry this same
-term.
+the only other term is the small `alpha` regulariser (prefactor
+`A_reg = A tau_c^(n-1)`, at a *constant* reference thickness) the
+linearised viscosity is absurd and Newton diverges.  Adding **diffusion
+creep** (`n = 1`, `A_lin_layers ~ 1e-3` MPa⁻¹ yr⁻¹, one entry per layer)
+in parallel with dislocation creep fixes it -- and it is a physical
+mechanism, not a numerical device: Goldsby & Kohlstedt's composite makes
+Glen's `n = 3` an effective average of several mechanisms, and the
+Thwaites multilayer runs carry this same term.  It is per-layer because
+its prefactor depends on temperature and grain size, it carries the
+*layer* thickness so it vanishes with the ice, and it is deliberately
+**not** scaled by the inverted log-fluidity `phi` -- diffusion creep is
+prescribed physics, and `phi` controls only the dislocation-creep
+component.  The honest consequence: at low deviatoric stress diffusion
+carries a large share of the effective fluidity (98 % at 10 kPa, 33 % at
+50 kPa, 6 % at 100 kPa for the `n = 4`, `A = 46` layer) and `phi` cannot
+adjust that share.
 
 `test/multilayer_rc_test.py` isolates what each ingredient buys.  Two-layer
 `n = 4 / 1.8` composite on a Coulomb bed, cold start `z = 0`, `m = 3`

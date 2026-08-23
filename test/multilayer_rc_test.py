@@ -10,10 +10,18 @@ Coulomb bed solves
   * from a cold start ``z = 0``, no warm start,
 
 on a geometry with both grounded ice and a floating tongue thinning to
-nothing.  The flow-law exponents ``n`` still ramp 1 -> n: at ``M = 0``
-the creep term contributes nothing, so only the small linear regulariser
-balances the strain-rate coupling and the linearised viscosity is absurd.
-ismip7 ramps ``n_flow`` for the same reason.
+nothing.
+
+What removes the remaining *viscous* ``n``-continuation is the question
+the 2x2 matrix below answers: (diffusion creep on/off) x (``n`` ramped
+1 -> n / set directly at its target).  Without a real ``n = 1``
+mechanism the creep term contributes nothing at ``M = 0``, only the tiny
+``alpha`` regulariser balances the strain-rate coupling, the linearised
+viscosity is absurd and the direct solve diverges -- so that divergence
+is asserted, because the negative result is the evidence.  Adding
+diffusion creep makes the direct solve converge, and it is checked
+against the ramped one to confirm it lands on the same solution rather
+than somewhere else.
 
     python -u multilayer_rc_test.py
 """
@@ -22,12 +30,13 @@ import firedrake
 from firedrake import (
     Constant, Function, FunctionSpace, VectorFunctionSpace, SpatialCoordinate,
     DirichletBC, NonlinearVariationalProblem, NonlinearVariationalSolver,
-    as_vector, assemble, dx, inner, sqrt, max_value, min_value,
+    as_vector, inner, sqrt, max_value,
 )
+from firedrake.exceptions import ConvergenceError
 
 from icepack_tools.constants import ice_density as rho_I, water_density as rho_W
 from icepack_tools.friction import weertman_anchor
-from icepack_tools.grounding import effective_pressure, grounded_mask
+from icepack_tools.grounding import effective_pressure
 from icepack_tools.momentum import multilayer_rc_residual
 from icepack_tools.viscosity import A_DIFFUSION
 
@@ -82,8 +91,12 @@ def build(nx=24, Lx=40e3, Ly=12e3):
     return mesh, Q, V, H, b, s, u_obs, Lx
 
 
-def solve_case(A_lin, ramp, verbose=False):
-    """One (diffusion on/off) x (n ramped/direct) case.  Returns (its, speed)."""
+def solve_case(A_lin_layers, ramp):
+    """One (diffusion on/off) x (n ramped/direct) case.
+
+    Returns ``(its, z, mesh, H, s)``: the total Newton count, the solved
+    mixed state and the geometry the diagnostics below need.
+    """
     mesh, Q, V, H, b, s, u_obs, Lx = build()
     from multilayer.model.utilities import create_function_space, layer_thicknesses
     Z = create_function_space(mesh, len(FRACTIONS))
@@ -100,7 +113,8 @@ def solve_case(A_lin, ramp, verbose=False):
     z = Function(Z)                       # COLD START
     F = multilayer_rc_residual(
         z, theta, phi, H=H, s=s, b=b, h_layers=h_layers, C_w0=C_w0,
-        A_layers=A_layers, n_consts=n_consts, n_vals=N_VALS, A_lin=A_lin,
+        A_layers=A_layers, n_consts=n_consts, n_vals=N_VALS,
+        A_lin_layers=A_lin_layers,
         m_slide=M_SLIDE, mesh=mesh, layer_fractions=FRACTIONS,
         h_visc_floor=10.0, c_w0_floor=1e-6,
     )
@@ -117,7 +131,7 @@ def solve_case(A_lin, ramp, verbose=False):
                 c.assign(1.0 + lam * (target - 1.0))
         solver.solve()
         its += solver.snes.getIterationNumber()
-    return its, z, mesh, Q, H, s, b, N_VALS
+    return its, z, mesh, H, s
 
 
 def main():
@@ -128,17 +142,26 @@ def main():
     print(f"  {'diffusion (n=1)':<18} {'n':<10} {'result':<26} {'max speed'}")
     print("  " + "-" * 68)
 
+    off = [None for _ in N_VALS]
+    on = [Constant(A_DIFFUSION) for _ in N_VALS]
     results = {}
-    for A_lin, tag in ((None, "off"), (Constant(A_DIFFUSION), f"{A_DIFFUSION:g}")):
+    for A_lin_layers, tag in ((off, "off"), (on, f"{A_DIFFUSION:g}")):
         for ramp, rtag in ((True, "ramped 1->n"), (False, "direct")):
             try:
-                its, z, mesh, Q, H, s, b, _ = solve_case(A_lin, ramp)
+                its, z, mesh, H, s = solve_case(A_lin_layers, ramp)
                 sp = np.hypot(*z.subfunctions[3].dat.data_ro.T).max()
                 print(f"  {tag:<18} {rtag:<10} {'converged, ' + str(its) + ' its':<26} "
                       f"{sp:8.1f} m/yr")
-                results[(tag, rtag)] = (its, z, mesh, Q, H, s, b)
-            except Exception as exc:
-                print(f"  {tag:<18} {rtag:<10} {'DIVERGED (' + type(exc).__name__ + ')':<26}")
+                results[(tag, rtag)] = (its, z, mesh, H, s)
+            except ConvergenceError as exc:
+                # Deliberately narrow: the ("off", "direct") divergence
+                # asserted below is this test's headline negative result,
+                # so anything that is NOT a convergence failure -- a UFL
+                # compilation error on the non-ramped path, a MUMPS
+                # allocation failure, an OOM -- must propagate and fail
+                # loudly rather than masquerade as the expected outcome.
+                print(f"  {tag:<18} {rtag:<10} {'DIVERGED':<26}")
+                print(f"    {' '.join(str(exc).split())[:160]}")
                 results[(tag, rtag)] = None
 
     assert results[("off", "ramped 1->n")], "ramped path must work without diffusion"
@@ -158,7 +181,7 @@ def main():
     assert rel < 1e-6, "ramped and direct solves disagree"
 
     # inspect the direct composite solution
-    its, z, mesh, Q, H, s, b = results[(f"{A_DIFFUSION:g}", "direct")]
+    _, z, mesh, H, s = results[(f"{A_DIFFUSION:g}", "direct")]
     u_b, u_t, tau = z.subfunctions[0], z.subfunctions[3], z.subfunctions[2]
     sp_b = np.hypot(*u_b.dat.data_ro.T)
     sp_t = np.hypot(*u_t.dat.data_ro.T)
@@ -170,12 +193,18 @@ def main():
     N_dg = Function(DG).interpolate(effective_pressure(H, s))
     tb_dg = Function(DG).interpolate(sqrt(inner(tau, tau)))
     afloat = N_dg.dat.data_ro <= 0.0
-    worst = float(np.abs(tb_dg.dat.data_ro[afloat]).max())
-    scale = float(np.abs(tb_dg.dat.data_ro).max())
     print(f"  floating cells (N == 0 exactly): {int(afloat.sum())}")
+    # Guarded: .max() on an empty selection raises, and the slab geometry
+    # could be retuned so the grounding line leaves the domain.  Likewise
+    # floor the denominator, so a degenerate all-zero stress field trips
+    # the assertion below rather than a ZeroDivisionError in this print.
+    assert afloat.any(), "no floating cells -- the grounding line left the domain"
+    worst = float(np.abs(tb_dg.dat.data_ro[afloat]).max())
+    scale = max(float(np.abs(tb_dg.dat.data_ro).max()), 1e-300)
+    rel = worst / scale
     print(f"  max |tau_b| there: {1e3*worst:.3e} kPa "
-          f"({worst/scale:.1e} of grounded max -- machine zero)")
-    assert worst / scale < 1e-12, "basal drag leaked onto floating ice"
+          f"({rel:.1e} of grounded max -- machine zero)")
+    assert rel < 1e-12, f"basal drag leaked onto floating ice: {rel:.2e}"
 
     print("\nPASS: with diffusion creep the composite solves cold and direct,")
     print("      no continuation in n and none in m")
