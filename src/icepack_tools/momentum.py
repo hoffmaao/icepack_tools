@@ -82,18 +82,26 @@ def calving_terminus(u, v, H, s, outflow_ids, layer_fraction=1.0):
     )
 
 
-def multilayer_rc_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
-                           A_layers, n_consts, n_vals, m_slide, mesh,
-                           layer_fractions=None, tau_c=0.1, alpha=1e-4,
-                           H_ref=100.0, A_lin_layers=None, c0=0.5, u_min=1.0,
-                           eps_tauc=0.0,
+def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
+                  A_layers, n_consts, n_vals, m_slide, mesh,
+                  law="regularized_coulomb",
+                  layer_fractions=None, tau_c=0.1, alpha=1e-4,
+                  H_ref=100.0, A_lin_layers=None, c0=0.5, u_min=1.0,
+                  eps_tauc=0.0, N_ref=None, nhat_floor=0.0, nhat_cap=3.0,
                            c_w0_floor=0.0, h_visc_floor=0.0, alpha_gl=0.0,
                            ocean_drag_coeff=0.0, h_ocean=10.0,
                            u_lim=0.0, k_lim=1e-3, gl_width=10.0,
                            outflow_ids=None):
-    r"""Full dual residual for an ``L``-layer column on a Coulomb bed.
+    r"""Full dual residual for an ``L``-layer column, ``L >= 1``.
 
-    The mixed state is ordered as ``multilayer`` builds it:
+    **``L = 1`` is the ordinary single-layer icepack2 dual model** -- the
+    interlayer loop is empty and the state reduces to ``(u, M, tau)`` on
+    ``V x Sigma x T``, byte-identical to what the single-layer consumers
+    build by hand.  So one builder serves both; there is no separate
+    single-layer code path to keep in step.
+
+    The mixed state is ordered as :func:`icepack_tools.spaces.dual_function_space`
+    builds it:
 
     .. code::
 
@@ -138,6 +146,12 @@ def multilayer_rc_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
         bracket at 10 kPa, 80 % at 25 kPa, 33 % at 50 kPa and 6 % at
         100 kPa; for an ``n = 1.8``, ``A = 0.451`` layer it is 10 % at
         10 kPa falling to 2 % at 100 kPa.
+
+    law : str
+        One of :data:`icepack_tools.friction.LAWS` -- ``regularized_coulomb``
+        (default), ``budd`` or ``weertman``.  ``N_ref``, ``nhat_floor`` and
+        ``nhat_cap`` apply to ``budd`` only; ``c0`` and ``eps_tauc`` to
+        ``regularized_coulomb`` only.
 
     Notes
     -----
@@ -195,9 +209,11 @@ def multilayer_rc_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
 
     # basal stress: regularised-Coulomb residual closure on layer 0
     u_b = fields[0]
-    tau_b = basal_stress(u_b, C_w0, theta, H, s, b, m_slide, c0=c0,
+    tau_b = basal_stress(u_b, C_w0, theta, H, s, b, m_slide, law=law, c0=c0,
                          u_min=u_min, eps_tauc=eps_tauc, He=He,
-                         gl_width=gl_width, c_w0_floor=c_w0_floor)
+                         gl_width=gl_width, c_w0_floor=c_w0_floor,
+                         N_ref=N_ref, nhat_floor=nhat_floor,
+                         nhat_cap=nhat_cap)
     if ocean_drag_coeff > 0.0:
         from .friction import ocean_drag
         tau_b = tau_b + ocean_drag(u_b, H, ocean_drag_coeff, h_ocean, u_min)
@@ -216,3 +232,9 @@ def multilayer_rc_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
             A_lin=A_lin_layers[l - 1], tau_c=tau_c, alpha=alpha,
         )
     return F
+
+
+#: Backwards-compatible alias.  The builder was named for the multilayer
+#: case before it was generalised; ``L = 1`` was always the single-layer
+#: model, so the name was misleading rather than the code.
+multilayer_rc_residual = dual_residual

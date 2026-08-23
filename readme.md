@@ -103,16 +103,71 @@ clamping `H` there fabricates a spurious `rho g H_floor grad(s)` and blows
 the buffer velocity up.  `momentum_residual` takes `h_floor` and applies
 it only to the `-h M : eps(v)` term.
 
+## Single-layer and multilayer are the same builder
+
+`L = 1` **is** the ordinary single-layer icepack2 dual model: the state
+reduces to `(u, M, tau)` on `V x Sigma x T` and the interlayer loop is
+empty.  So `dual_residual` covers both, and there is no separate
+single-layer code path to keep in step.
+
+`spaces.dual_function_space(mesh, num_layers=1)` builds that space, and
+`test/dual_forms_test.py` checks element-for-element that it reproduces
+what the single-layer consumers write by hand (`Z = V * Sigma * T` in
+`ismip7/antarctica/scripts/diagnostic_solve.py`) -- so adopting the helper
+is not a silent change of discretisation.  Providing it here also means a
+single-layer consumer never has to depend on the multilayer package.
+
+```python
+from icepack_tools.spaces import dual_function_space, layer_thicknesses
+from icepack_tools.friction import weertman_anchor
+from icepack_tools.momentum import dual_residual
+
+Z = dual_function_space(mesh)                    # single layer
+z = Function(Z)                                  # cold start is fine
+F = dual_residual(z, theta, phi, H=H, s=s, b=b,
+                  h_layers=layer_thicknesses(H, 1),
+                  C_w0=weertman_anchor(H, s, u_obs, m, Q),
+                  A_layers=[A], n_consts=[n], n_vals=[3.0],
+                  m_slide=m, mesh=mesh, law="budd")
+```
+
+## Friction laws
+
+Three, selected with `law=`, named to match ismip7's `fric_law`.  All
+share the Weertman branch `tau_W = C_w0 exp(theta He) |u|^(1/m)` and
+differ only in how the bed's strength is capped:
+
+| `law` | `tau_b` | zero afloat |
+|---|---|---|
+| `weertman` | `tau_W` | **no** -- there is no cap |
+| `budd` | `tau_W * N_hat`, `N_hat = N/N_ref` normalised | yes, exactly |
+| `regularized_coulomb` | `tau_W tau_cap / (tau_W + tau_cap)`, `tau_cap = c0 N` | yes, exactly |
+
+Measured on the test slab (`L = 1`, `n = 3`, cold start, `theta = 0`),
+maximum `|tau_b|` on cells where `N == 0` exactly:
+
+| law | its | max speed | shelf drag |
+|---|---|---|---|
+| `regularized_coulomb` | 22 | 1943.3 m/yr | 7.0e-16 kPa (2.2e-18 of grounded max) |
+| `budd` | 22 | 563.5 m/yr | 2.8e-12 kPa (8.5e-15) |
+| `weertman` | 23 | 356.9 m/yr | 6.2e+01 kPa (1.9e-01) |
+
+Weertman's nonzero shelf drag is correct, not a bug -- it has no
+effective-pressure cap.  The test asserts it *is* nonzero, so that the
+machine-zero assertions on the other two are known to be discriminating
+rather than vacuously true.
+
 ## Modules
 
 | module | contents |
 |---|---|
 | `constants` | physical constants, re-exported from icepack2 |
+| `spaces` | `dual_function_space` (L >= 1), `layer_thicknesses`, `split_layers` |
 | `geometry` | `cg1_lift`, `surface_slope` (CG1 *or* DG0 safe) |
 | `grounding` | `height_above_flotation`, `grounded_mask`, `effective_pressure` |
-| `friction` | `weertman_anchor`, `basal_stress`, `friction_residual`, floor-cell drags |
+| `friction` | `weertman_anchor`, `basal_stress` (3 laws), `friction_residual`, floor-cell drags |
 | `viscosity` | `membrane_residual`, `interlayer_residual` (composite, regularised) |
-| `momentum` | `momentum_residual`, `calving_terminus`, `multilayer_rc_residual` |
+| `momentum` | `momentum_residual`, `calving_terminus`, `dual_residual` (L >= 1) |
 
 ## Calving fronts
 
