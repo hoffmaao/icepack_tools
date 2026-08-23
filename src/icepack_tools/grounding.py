@@ -3,8 +3,9 @@ r"""Grounding-line quantities for the icepack2 dual form.
 Everything here is built from the *model* thickness and surface, so the
 grounded/floating transition is the hydrostatic flotation criterion itself
 rather than a mask carried alongside the state.  That is what lets the
-regularised-Coulomb friction in :mod:`icepack_tools.friction` give
-*exactly* zero basal drag on floating ice.
+effective-pressure-capped friction laws in :mod:`icepack_tools.friction`
+(``budd`` and ``regularized_coulomb``) give *exactly* zero basal drag on
+floating ice.
 
 Ported from ``ismip7/icepack2_tools/grounding.py``.
 """

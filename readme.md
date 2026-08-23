@@ -53,8 +53,8 @@ its prefactor depends on temperature and grain size, it carries the
 prescribed physics, and `phi` controls only the dislocation-creep
 component.  The honest consequence: at low deviatoric stress diffusion
 carries a large share of the effective fluidity and `phi` cannot adjust
-that share.  `multilayer_rc_residual`'s `A_lin_layers` docstring gives
-that share layer by layer and stress by stress.
+that share.  `dual_residual`'s `A_lin_layers` docstring gives that share
+layer by layer and stress by stress.
 
 `test/multilayer_rc_test.py` isolates what each ingredient buys.  Two-layer
 `n = 4 / 1.8` composite on a Coulomb bed, cold start `z = 0`, `m = 3`

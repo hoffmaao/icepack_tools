@@ -213,10 +213,10 @@ def basal_stress(u, C_w0, theta, H, s, b, m_slide, *, law="regularized_coulomb",
                               Constant(nhat_cap))
         # He, not the sign of N, is what enforces the zero afloat.  N is
         # the *cancelling* difference p_I - p_W, which on a shelf is a
-        # roundoff residue of either sign rather than exactly 0, so
-        # gt(N, 0) lets O(1e-16) N through -- and with N_ref equally tiny
-        # there, the floor term nhat_floor * p_I / Nr then amplifies it to
-        # nhat_cap.  He is a function of height above flotation, so it is
+        # roundoff residue rather than exactly 0, so gt(N, 0) lets an
+        # O(1e-16) N through -- and with N_ref equally tiny there, the
+        # floor term nhat_floor * p_I / Nr then amplifies it all the way
+        # to nhat_cap.  He is a function of height above flotation, so it is
         # 0 hundreds of metres below flotation whatever N's roundoff does,
         # and it is continuous where the conditional was not.  The
         # conditional stays as a harmless guard on the sign of N.

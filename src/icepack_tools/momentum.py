@@ -88,10 +88,10 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
                   layer_fractions=None, tau_c=0.1, alpha=1e-4,
                   H_ref=100.0, A_lin_layers=None, c0=0.5, u_min=1.0,
                   eps_tauc=0.0, N_ref=None, nhat_floor=0.0, nhat_cap=3.0,
-                           c_w0_floor=0.0, h_visc_floor=0.0, alpha_gl=0.0,
-                           ocean_drag_coeff=0.0, h_ocean=10.0,
-                           u_lim=0.0, k_lim=1e-3, gl_width=10.0,
-                           outflow_ids=None):
+                  c_w0_floor=0.0, h_visc_floor=0.0, alpha_gl=0.0,
+                  ocean_drag_coeff=0.0, h_ocean=10.0,
+                  u_lim=0.0, k_lim=1e-3, gl_width=10.0,
+                  outflow_ids=None):
     r"""Full dual residual for an ``L``-layer column, ``L >= 1``.
 
     **``L = 1`` is the ordinary single-layer icepack2 dual model** -- the
