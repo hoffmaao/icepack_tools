@@ -36,7 +36,7 @@ from firedrake.exceptions import ConvergenceError
 
 from icepack_tools.constants import ice_density as rho_I, water_density as rho_W
 from icepack_tools.friction import weertman_anchor
-from icepack_tools.grounding import effective_pressure
+from icepack_tools.grounding import effective_pressure, height_above_flotation
 from icepack_tools.momentum import multilayer_rc_residual
 from icepack_tools.viscosity import A_DIFFUSION
 
@@ -94,7 +94,7 @@ def build(nx=24, Lx=40e3, Ly=12e3):
 def solve_case(A_lin_layers, ramp):
     """One (diffusion on/off) x (n ramped/direct) case.
 
-    Returns ``(its, z, mesh, H, s)``: the total Newton count, the solved
+    Returns ``(its, z, mesh, H, b, s)``: the total Newton count, the solved
     mixed state and the geometry the diagnostics below need.
     """
     mesh, Q, V, H, b, s, u_obs, Lx = build()
@@ -131,7 +131,7 @@ def solve_case(A_lin_layers, ramp):
                 c.assign(1.0 + lam * (target - 1.0))
         solver.solve()
         its += solver.snes.getIterationNumber()
-    return its, z, mesh, H, s
+    return its, z, mesh, H, b, s
 
 
 def main():
@@ -148,11 +148,11 @@ def main():
     for A_lin_layers, tag in ((off, "off"), (on, f"{A_DIFFUSION:g}")):
         for ramp, rtag in ((True, "ramped 1->n"), (False, "direct")):
             try:
-                its, z, mesh, H, s = solve_case(A_lin_layers, ramp)
+                its, z, mesh, H, b, s = solve_case(A_lin_layers, ramp)
                 sp = np.hypot(*z.subfunctions[3].dat.data_ro.T).max()
                 print(f"  {tag:<18} {rtag:<10} {'converged, ' + str(its) + ' its':<26} "
                       f"{sp:8.1f} m/yr")
-                results[(tag, rtag)] = (its, z, mesh, H, s)
+                results[(tag, rtag)] = (its, z, mesh, H, b, s)
             except ConvergenceError as exc:
                 # Deliberately narrow: the ("off", "direct") divergence
                 # asserted below is this test's headline negative result,
@@ -181,7 +181,7 @@ def main():
     assert rel < 1e-6, "ramped and direct solves disagree"
 
     # inspect the direct composite solution
-    _, z, mesh, H, s = results[(f"{A_DIFFUSION:g}", "direct")]
+    _, z, mesh, H, b, s = results[(f"{A_DIFFUSION:g}", "direct")]
     u_b, u_t, tau = z.subfunctions[0], z.subfunctions[3], z.subfunctions[2]
     sp_b = np.hypot(*u_b.dat.data_ro.T)
     sp_t = np.hypot(*u_t.dat.data_ro.T)
@@ -191,9 +191,15 @@ def main():
 
     DG = FunctionSpace(mesh, "DG", 0)
     N_dg = Function(DG).interpolate(effective_pressure(H, s))
+    haf_dg = Function(DG).interpolate(height_above_flotation(H, b))
     tb_dg = Function(DG).interpolate(sqrt(inner(tau, tau)))
-    afloat = N_dg.dat.data_ro <= 0.0
-    print(f"  floating cells (N == 0 exactly): {int(afloat.sum())}")
+    # Geometry, not N <= 0: N is the cancelling difference p_I - p_W, so on
+    # a shelf it is a roundoff residue rather than 0, and an N <= 0 mask
+    # drops exactly the cells a friction law gated on N > 0 can act on.
+    afloat = haf_dg.dat.data_ro < -100.0
+    print(f"  cells 100 m below flotation: {int(afloat.sum())} "
+          f"({int((N_dg.dat.data_ro[afloat] > 0.0).sum())} of them with N > 0 "
+          f"by roundoff)")
     # Guarded: .max() on an empty selection raises, and the slab geometry
     # could be retuned so the grounding line leaves the domain.  Likewise
     # floor the denominator, so a degenerate all-zero stress field trips

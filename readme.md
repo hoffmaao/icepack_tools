@@ -73,16 +73,23 @@ continuation apparatus disappears** -- one cold solve replaces a staged
 ramp.  The ramped and direct paths agree to 7.9e-12, so the direct solve
 is not converging somewhere else.
 
-The test also checks the headline property directly: on the 296 cells
-where `N == 0` exactly, `|tau_b|` is 5.3e-15 kPa, i.e. 1.8e-17 of the
-grounded maximum -- machine zero, against the ~1 % of grounded drag that a
-`phi_eff` floor of 0.01 leaves on every shelf node.
+The test also checks the headline property directly: on the 280 cells
+lying 100 m or more below flotation, `|tau_b|` is 5.3e-15 kPa, i.e.
+1.8e-17 of the grounded maximum -- machine zero, against the ~1 % of
+grounded drag that a `phi_eff` floor of 0.01 leaves on every shelf node.
+Floating cells are picked out by height above flotation rather than by
+`N <= 0`: `N` is the cancelling difference `p_I - p_W`, so on a shelf it
+is a roundoff residue rather than 0, and an `N <= 0` mask would drop
+exactly the cells a law gated on `N > 0` still acts on.
 
 ## What this buys
 
 - **Exactly zero drag on floating ice.**  `N = max(p_I - p_W, 0)` is built
   from the *model* surface, so it vanishes at precisely the hydrostatic
-  flotation criterion.  No `phi_eff` floor, so no residual shelf drag.
+  flotation criterion, and `budd` additionally gates on the grounded
+  indicator `He` so that the roundoff residue of that cancelling
+  difference cannot be amplified back into shelf drag.  No `phi_eff`
+  floor, so no residual shelf drag.
 - **Grounded-only friction inference.**  `theta` is carried as
   `exp(theta * He)` with `He` a smooth grounded indicator, so `dJ/dtheta`
   is identically zero afloat: an optimiser physically cannot place basal
@@ -140,17 +147,27 @@ differ only in how the bed's strength is capped:
 | `law` | `tau_b` | zero afloat |
 |---|---|---|
 | `weertman` | `tau_W` | **no** -- there is no cap |
-| `budd` | `tau_W * N_hat`, `N_hat = N/N_ref` normalised | yes, exactly |
-| `regularized_coulomb` | `tau_W tau_cap / (tau_W + tau_cap)`, `tau_cap = c0 N` | yes, exactly |
+| `budd` | `tau_W * He * N_hat`, `N_hat = N/N_ref` normalised | yes -- the `He` gate |
+| `regularized_coulomb` | `tau_W tau_cap / (tau_W + tau_cap)`, `tau_cap = c0 N` | yes -- `N` is a factor |
+
+Budd's zero afloat is enforced by the grounded indicator `He`, not by the
+sign of `N`.  `N` is the cancelling difference `p_I - p_W`, which on a
+shelf is a roundoff residue rather than 0; with a frozen `N_ref` the
+`nhat_floor` term `nhat_floor * p_I / N_ref` would otherwise amplify that
+residue all the way to `nhat_cap`.  `He` is a function of height above
+flotation, so it is zero hundreds of metres below flotation whatever the
+last bits of `N` do -- and it is continuous, which a gate on `N > 0` is
+not.  `regularized_coulomb` needs no such gate: `N` enters as a factor,
+so the residue passes straight through instead of being amplified.
 
 Measured on the test slab (`L = 1`, `n = 3`, cold start, `theta = 0`),
-maximum `|tau_b|` on cells where `N == 0` exactly:
+maximum `|tau_b|` on cells 100 m or more below flotation:
 
 | law | its | max speed | shelf drag |
 |---|---|---|---|
 | `regularized_coulomb` | 22 | 1943.3 m/yr | 7.0e-16 kPa (2.2e-18 of grounded max) |
-| `budd` | 22 | 563.5 m/yr | 2.8e-12 kPa (8.5e-15) |
-| `weertman` | 23 | 356.9 m/yr | 6.2e+01 kPa (1.9e-01) |
+| `budd` | 22 | 731.6 m/yr | 2.3e-26 kPa (6.9e-29) |
+| `weertman` | 23 | 356.9 m/yr | 5.7e+00 kPa (1.7e-02) |
 
 Weertman's nonzero shelf drag is correct, not a bug -- it has no
 effective-pressure cap.  The test asserts it *is* nonzero, so that the

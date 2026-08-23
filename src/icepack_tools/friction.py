@@ -36,8 +36,9 @@ blend that is smooth everywhere:
 which is Weertman at low speed, the Coulomb cap at high speed, and
 **exactly zero** where the ice floats, because :math:`N \to 0` there.
 Budd caps the same :math:`\tau_W` by a normalised effective pressure and
-likewise vanishes afloat; plain Weertman has no :math:`N` factor at all,
-so it keeps drag on floating ice and must be masked if that matters.
+likewise vanishes afloat, there gated by the grounded indicator rather
+than by the sign of :math:`N`; plain Weertman has no :math:`N` factor at
+all, so it keeps drag on floating ice and must be masked if that matters.
 
 Ported and generalised from ``ismip7/icepack2_tools/dual_friction.py``
 (itself derived from ``gia-icepack/scripts/ase_model.py:build_F_rc``).
@@ -104,17 +105,22 @@ def basal_stress(u, C_w0, theta, H, s, b, m_slide, *, law="regularized_coulomb",
         :math:`\tau_b = \tau_W`.  No cap, so drag does **not** vanish on
         floating ice by itself -- pair it with a mask if that matters.
     ``budd``
-        :math:`\tau_b = \tau_W \hat N`, with :math:`\hat N = N/N_{\rm ref}`
-        the *normalised* effective pressure.  With ``N_ref=None`` (the
-        inversion geometry) :math:`\hat N = 1` on grounded ice, so the
-        inferred friction is preserved and the effective-pressure feedback
-        is a *relative* change as the geometry evolves.
+        :math:`\tau_b = \tau_W H_e \hat N`, with
+        :math:`\hat N = N/N_{\rm ref}` the *normalised* effective pressure.
+        With ``N_ref=None`` (the inversion geometry) :math:`\hat N = 1` on
+        grounded ice, so the inferred friction is preserved and the
+        effective-pressure feedback is a *relative* change as the geometry
+        evolves.  The grounded indicator :math:`H_e` -- not the sign of
+        :math:`N` -- is what holds :math:`\tau_b` at zero afloat.
     ``regularized_coulomb``
         :math:`\tau_b = \tau_W\tau_{\rm cap}/(\tau_W + \tau_{\rm cap})`
         with :math:`\tau_{\rm cap} = c_0 N`.
 
-    ``budd`` and ``regularized_coulomb`` both give **exactly** zero drag
-    where the ice floats, because :math:`N \to 0` there.
+    ``budd`` and ``regularized_coulomb`` both give zero drag to machine
+    precision where the ice floats: ``budd`` because :math:`H_e` vanishes
+    there, ``regularized_coulomb`` because :math:`N` enters as a *factor*,
+    so the roundoff residue of :math:`p_I - p_W` passes straight through
+    rather than being amplified.
 
     Parameters
     ----------
@@ -205,7 +211,16 @@ def basal_stress(u, C_w0, theta, H, s, b, m_slide, *, law="regularized_coulomb",
             p_I = ice_density * gravity * max_value(H, Constant(1.0))
             N_hat = min_value(max_value(N_hat, Constant(nhat_floor) * p_I / Nr),
                               Constant(nhat_cap))
-        N_hat = conditional(gt(N, Constant(0.0)), N_hat, Constant(0.0))
+        # He, not the sign of N, is what enforces the zero afloat.  N is
+        # the *cancelling* difference p_I - p_W, which on a shelf is a
+        # roundoff residue of either sign rather than exactly 0, so
+        # gt(N, 0) lets O(1e-16) N through -- and with N_ref equally tiny
+        # there, the floor term nhat_floor * p_I / Nr then amplifies it to
+        # nhat_cap.  He is a function of height above flotation, so it is
+        # 0 hundreds of metres below flotation whatever N's roundoff does,
+        # and it is continuous where the conditional was not.  The
+        # conditional stays as a harmless guard on the sign of N.
+        N_hat = He * conditional(gt(N, Constant(0.0)), N_hat, Constant(0.0))
         return tau_W * N_hat
 
     # regularized_coulomb: harmonic blend -> tau_W at low speed, -> tau_cap
