@@ -12,6 +12,10 @@ Three claims the other icepack repos would rely on:
   * all three friction laws close and solve, and the two with an
     effective-pressure cap give *exactly* zero drag on floating ice while
     Weertman -- correctly, since it has no cap -- does not.
+  * the two entry points that must agree on ``L`` say so when they do
+    not, and Budd's PISM floor is only accepted where it means what it
+    says (against a frozen ``N_ref``), where its amplification and its
+    grounding-line jump are then pinned.
 
     python -u dual_forms_test.py
 """
@@ -24,10 +28,12 @@ from firedrake import (
 )
 
 from icepack_tools.constants import ice_density as rho_I, water_density as rho_W
-from icepack_tools.friction import weertman_anchor, LAWS
+from icepack_tools.friction import basal_stress, weertman_anchor, LAWS
 from icepack_tools.grounding import effective_pressure
 from icepack_tools.momentum import dual_residual
-from icepack_tools.spaces import dual_function_space, layer_thicknesses
+from icepack_tools.spaces import (
+    dual_function_space, layer_thicknesses, split_layers,
+)
 from icepack_tools.viscosity import A_DIFFUSION
 
 M_SLIDE = 3.0
@@ -118,6 +124,120 @@ def shelf_drag(mesh, Q, H, s, z):
             float(np.abs(tb.dat.data_ro).max()))
 
 
+def test_layer_count_guards():
+    """The two entry points must agree on L, loudly rather than in MUMPS."""
+    mesh, Q, H, b, s, u_obs = build(nx=6)
+    Z = dual_function_space(mesh, 2)
+    z = Function(Z)
+
+    # L=2 space, L=1 thicknesses: layer 1's blocks would appear in no term
+    try:
+        dual_residual(
+            z, Function(Q), Function(Q), H=H, s=s, b=b,
+            h_layers=layer_thicknesses(H, 1), C_w0=weertman_anchor(
+                H, s, u_obs, M_SLIDE, Q),
+            A_layers=[Constant(20.0)], n_consts=[Constant(3.0)], n_vals=[3.0],
+            m_slide=M_SLIDE, mesh=mesh,
+        )
+    except ValueError as e:
+        assert "6-block" in str(e) and "1 layer" in str(e), str(e)
+        print(f"  layer-count mismatch rejected: {str(e).splitlines()[0][:60]}...")
+    else:
+        raise AssertionError("L mismatch not caught; Jacobian would be singular")
+
+    try:
+        layer_thicknesses(H, 2, fractions=[0.15, 0.8])
+    except ValueError as e:
+        assert "sum to 1" in str(e), str(e)
+        print("  fractions that do not sum to 1 rejected "
+              "(0.95 would silently drop 5% of the column)")
+    else:
+        raise AssertionError("fractions summing to 0.95 accepted")
+
+    layers = split_layers(z, 2)
+    assert layers[0]["interlayer_stress"] is layers[0]["basal_stress"], (
+        "layer 0's two stress names must be the same unknown")
+    assert all("interlayer_stress" in lyr for lyr in layers), (
+        "interlayer_stress must key the stress on every layer, layer 0 included")
+    print("  split_layers keys the stress uniformly as interlayer_stress, "
+          "with basal_stress aliasing layer 0")
+
+
+def test_budd_nhat_floor():
+    """Budd's PISM floor: rejected without N_ref, pinned with it."""
+    mesh, Q, H, b, s, u_obs = build(nx=20)
+    C_w0 = weertman_anchor(H, s, u_obs, M_SLIDE, Q)
+    theta = Function(Q)
+    args = (u_obs, C_w0, theta, H, s, b, M_SLIDE)
+
+    # with N_ref=None the reference IS N, so N_hat == 1 and the "floor"
+    # would amplify instead: reject rather than quietly invert its meaning
+    try:
+        basal_stress(*args, law="budd", nhat_floor=0.02, nhat_cap=3.0)
+    except ValueError as e:
+        assert "N_ref" in str(e), str(e)
+        print("  budd + nhat_floor + N_ref=None rejected "
+              "(the floor has no meaning against a moving reference)")
+    else:
+        raise AssertionError("nhat_floor with N_ref=None accepted")
+    basal_stress(*args, law="budd", nhat_floor=0.0)      # still fine at 0
+
+    # with a frozen N_ref the branch is legitimate; pin what it does
+    DG = FunctionSpace(mesh, "DG", 0)
+    N = Function(DG).interpolate(effective_pressure(H, s))
+    N_ref = Function(DG).assign(N)                       # frozen snapshot
+    nhat_cap = 3.0
+
+    tau_W = Function(DG).interpolate(basal_stress(*args, law="weertman"))
+    tau_b = Function(DG).interpolate(
+        basal_stress(*args, law="budd", N_ref=N_ref, nhat_floor=0.02,
+                     nhat_cap=nhat_cap))
+    tau_0 = Function(DG).interpolate(
+        basal_stress(*args, law="budd", N_ref=N_ref, nhat_floor=0.0,
+                     nhat_cap=nhat_cap))
+
+    assert (tau_W.dat.data_ro > 0).all(), "tau_W must be positive everywhere"
+    nhat = tau_b.dat.data_ro / tau_W.dat.data_ro
+    nhat_0 = tau_0.dat.data_ro / tau_W.dat.data_ro
+    afloat = N.dat.data_ro <= 0.0
+    # above the 1e-6 denominator floor, so N/Nr is exactly 1 for a frozen N_ref
+    grounded = N.dat.data_ro >= 1e-6
+    assert afloat.any() and grounded.any(), "geometry must straddle the GL"
+
+    # gt(N, 0) drops drag to exactly zero afloat, floor or no floor
+    assert np.abs(tau_b.dat.data_ro[afloat]).max() == 0.0, (
+        "budd must give bit-exact zero drag afloat even with the floor on")
+    # without the floor, a frozen N_ref taken at this geometry gives N_hat = 1
+    assert np.allclose(nhat_0[grounded], 1.0), (
+        f"N_ref frozen at the current geometry should give N_hat = 1, got "
+        f"{nhat_0[grounded].min()}..{nhat_0[grounded].max()}")
+    # with it on, near-flotation cells are AMPLIFIED, saturating at nhat_cap
+    assert nhat[grounded].max() > 1.0 + 1e-9, (
+        "the floor should raise N_hat above 1 near flotation; it did not, so "
+        "this branch is still untested")
+    assert nhat[grounded].max() <= nhat_cap + 1e-9, "nhat_cap did not bind"
+    assert (nhat[grounded] >= nhat_0[grounded] - 1e-12).all(), (
+        "the floor must never reduce N_hat")
+    n_amplified = int((nhat[grounded] > 1.0 + 1e-9).sum())
+    assert n_amplified > 0
+    # a floor big enough to saturate pins the nhat_cap branch itself
+    tau_sat = Function(DG).interpolate(
+        basal_stress(*args, law="budd", N_ref=N_ref, nhat_floor=0.5,
+                     nhat_cap=nhat_cap))
+    nhat_sat = tau_sat.dat.data_ro / tau_W.dat.data_ro
+    assert np.isclose(nhat_sat[grounded].max(), nhat_cap), (
+        f"nhat_cap should clamp the saturated floor to {nhat_cap}, got "
+        f"{nhat_sat[grounded].max()}")
+    assert np.abs(tau_sat.dat.data_ro[afloat]).max() == 0.0, (
+        "the cap must not resurrect drag afloat")
+    # ...and then fall off a cliff at the grounding line
+    print(f"  frozen N_ref: N_hat = 1 on grounded ice without the floor; "
+          f"with it, {n_amplified}/{grounded.sum()} grounded cells amplify to "
+          f"max {nhat[grounded].max():.2f} (cap {nhat_cap:.1f}), then drop "
+          f"discontinuously to 0 afloat; nhat_floor=0.5 saturates at the "
+          f"cap ({nhat_sat[grounded].max():.2f}) and is still 0 afloat")
+
+
 def main():
     print("Generality of the dual residual builder.\n")
 
@@ -160,6 +280,12 @@ def main():
     assert len(z.subfunctions) == 6
     print(f"  n=4/1.8, cold start, converged in {its} its; "
           f"shear {np.abs(sp_t - sp_b).max():.1f} m/yr")
+
+    print("\n5. the entry points police their own layer count")
+    test_layer_count_guards()
+
+    print("\n6. budd's PISM floor only where it means what it says")
+    test_budd_nhat_floor()
 
     print("\nPASS: one builder covers L=1 and L>1 and all three friction laws")
 

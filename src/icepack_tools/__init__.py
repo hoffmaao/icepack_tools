@@ -13,7 +13,8 @@ constants   physical constants, re-exported from icepack2
 spaces      mixed dual function spaces, L >= 1 (L = 1 is single-layer)
 geometry    CG1 lifting and a slope that works for CG1 or DG0 surfaces
 grounding   height above flotation, smooth grounded mask, effective pressure
-friction    regularised-Coulomb basal stress and its residual closure
+friction    Weertman/Budd/regularised-Coulomb basal stress, closed as
+            a residual
 viscosity   composite membrane and interlayer closures
 momentum    per-layer momentum balance and full single/multi-layer residuals
 """

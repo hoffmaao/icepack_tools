@@ -179,6 +179,15 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
         )
 
     fields = split(z)
+    if len(fields) != 3 * num_layers:
+        raise ValueError(
+            f"z lives in a {len(fields)}-block space but h_layers describes "
+            f"{num_layers} layer(s) ({3 * num_layers} blocks expected).  "
+            f"dual_function_space(mesh, num_layers) and layer_thicknesses(H, "
+            f"num_layers) must agree on the layer count; otherwise the extra "
+            f"blocks appear in no term and the Jacobian is structurally "
+            f"singular."
+        )
     tests = split(TestFunction(z.function_space()))
     He = grounded_mask(H, b, gl_width=gl_width)
 
@@ -207,7 +216,7 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
                                      layer_fraction=layer_fractions[l])
         F = term if F is None else F + term
 
-    # basal stress: regularised-Coulomb residual closure on layer 0
+    # basal stress: residual closure for the chosen `law` on layer 0
     u_b = fields[0]
     tau_b = basal_stress(u_b, C_w0, theta, H, s, b, m_slide, law=law, c0=c0,
                          u_min=u_min, eps_tauc=eps_tauc, He=He,

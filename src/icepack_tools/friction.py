@@ -1,8 +1,10 @@
-r"""Regularised-Coulomb basal friction for the icepack2 dual form.
+r"""Basal friction laws for the icepack2 dual form.
 
-Written as a variational **residual that closes the basal stress
-directly**, not as a dissipation potential.  This is the crux of the
-module, so it is worth stating plainly why.
+Three laws are available -- Weertman, Budd and regularised Coulomb (see
+:data:`LAWS`) -- and all three are written as a variational **residual
+that closes the basal stress directly**, not as a dissipation potential.
+That property is shared, not incidental to any one law, so it is worth
+stating plainly why.
 
 The dual form carries the basal stress :math:`\tau` as an unknown.  The
 usual ``icepack2.model.minimization.friction_power`` closes it through a
@@ -19,11 +21,12 @@ tidewater glacier that limit is not a corner case but the operating
 point: with :math:`u_0 = 300` m/yr, a trunk moving 2000 m/yr sits at
 :math:`r \approx 0.97`, and Newton cannot reach it from :math:`\tau = 0`.
 
-Closing :math:`\tau = \tau_{RC}(u)` as a residual instead makes the
+Closing :math:`\tau = \tau_b(u)` as a residual instead makes the
 basal-stress block of the dual system the **identity** -- perfectly
 conditioned at :math:`\tau = 0` -- and needs no continuation in the
-sliding exponent.  The Coulomb limit is reached through a harmonic blend
-that is smooth everywhere:
+sliding exponent, whichever law supplies :math:`\tau_b`.  For the
+regularised-Coulomb law the Coulomb limit is reached through a harmonic
+blend that is smooth everywhere:
 
 .. math::
     \tau_W   &= C_{w0}\,e^{\theta H_e}\,|u|_{\rm reg}^{1/m}  \\
@@ -32,6 +35,9 @@ that is smooth everywhere:
 
 which is Weertman at low speed, the Coulomb cap at high speed, and
 **exactly zero** where the ice floats, because :math:`N \to 0` there.
+Budd caps the same :math:`\tau_W` by a normalised effective pressure and
+likewise vanishes afloat; plain Weertman has no :math:`N` factor at all,
+so it keeps drag on floating ice and must be masked if that matters.
 
 Ported and generalised from ``ismip7/icepack2_tools/dual_friction.py``
 (itself derived from ``gia-icepack/scripts/ase_model.py:build_F_rc``).
@@ -136,23 +142,44 @@ def basal_stress(u, C_w0, theta, H, s, b, m_slide, *, law="regularized_coulomb",
         Coercivity floor on ``C_w0``, needed only where the mesh has
         ice-free nodes (``H = 0``) at which both ``C_w0`` and the viscous
         coupling ``H M`` vanish and the velocity loses all coercivity.  It
-        does not leak onto real shelves (those keep ``N = 0``, hence
-        ``tau_b = 0`` exactly) and is absorbed by ``theta`` on grounded ice.
-        Leave at 0 when ``H`` is clamped positive upstream.
+        is absorbed by ``theta`` on grounded ice.  Under ``budd`` and
+        ``regularized_coulomb`` it does not leak onto real shelves either
+        (those keep ``N = 0``, hence ``tau_b = 0`` exactly); under
+        ``weertman`` there is no ``N`` factor, so a floored ``C_w0`` does
+        produce shelf drag.  Leave at 0 when ``H`` is clamped positive
+        upstream.
     N_ref : Function or None
         Budd only.  Reference effective pressure for the normalisation.
         ``None`` uses the current ``N``, giving ``N_hat = 1`` on grounded
         ice -- correct at the inversion geometry.
     nhat_floor : float
-        Budd only.  PISM-style delta floor on ``N_hat`` as a fraction of
-        local overburden (Bueler & van Pelt 2015 use ~0.02), which removes
-        the frictionless degeneracy near flotation.  The floor evolves with
-        the overburden, so it decays as the ice thins.  0 disables it.
+        Budd only, and **requires an explicit** ``N_ref``.  PISM-style
+        delta floor on ``N_hat`` as a fraction of local overburden (Bueler
+        & van Pelt 2015 use ~0.02), which removes the frictionless
+        degeneracy near flotation.  The floor evolves with the overburden,
+        so it decays as the ice thins.  0 disables it.
+
+        The floor is measured against ``N_ref``, so it only has PISM
+        semantics when ``N_ref`` is a frozen snapshot.  With
+        ``N_ref=None`` the reference *is* the current ``N``, ``N_hat`` is
+        already identically 1 on grounded ice, and the term would
+        *amplify* near-flotation drag up to ``nhat_cap`` rather than floor
+        anything -- so that combination is rejected outright.
     nhat_cap : float
         Budd only.  Upper bound on ``N_hat`` (Joughin's ``reduceNearGLBeta``).
     """
     if law not in LAWS:
         raise ValueError(f"unknown friction law {law!r}; expected one of {LAWS}")
+    if law == "budd" and nhat_floor > 0.0 and N_ref is None:
+        raise ValueError(
+            "nhat_floor > 0 requires an explicit N_ref: the PISM floor "
+            "semantics only exist against a frozen N_ref snapshot.  With "
+            "N_ref=None the reference is the current N, so N_hat is "
+            "identically 1 on grounded ice and the floor term "
+            "nhat_floor * p_I / N amplifies near-flotation drag up to "
+            "nhat_cap instead of flooring it.  Pass a frozen N_ref (e.g. the "
+            "inversion-geometry effective pressure) or set nhat_floor=0."
+        )
     if He is None:
         He = grounded_mask(H, b, gl_width=gl_width)
     N = effective_pressure(H, s)
