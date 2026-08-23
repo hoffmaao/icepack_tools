@@ -53,8 +53,8 @@ its prefactor depends on temperature and grain size, it carries the
 prescribed physics, and `phi` controls only the dislocation-creep
 component.  The honest consequence: at low deviatoric stress diffusion
 carries a large share of the effective fluidity and `phi` cannot adjust
-that share.  `multilayer_rc_residual`'s `A_lin_layers` docstring gives
-that share layer by layer and stress by stress.
+that share.  `dual_residual`'s `A_lin_layers` docstring gives that share
+layer by layer and stress by stress.
 
 `test/multilayer_rc_test.py` isolates what each ingredient buys.  Two-layer
 `n = 4 / 1.8` composite on a Coulomb bed, cold start `z = 0`, `m = 3`
@@ -73,16 +73,23 @@ continuation apparatus disappears** -- one cold solve replaces a staged
 ramp.  The ramped and direct paths agree to 7.9e-12, so the direct solve
 is not converging somewhere else.
 
-The test also checks the headline property directly: on the 296 cells
-where `N == 0` exactly, `|tau_b|` is 5.3e-15 kPa, i.e. 1.8e-17 of the
-grounded maximum -- machine zero, against the ~1 % of grounded drag that a
-`phi_eff` floor of 0.01 leaves on every shelf node.
+The test also checks the headline property directly: on the 280 cells
+lying 100 m or more below flotation, `|tau_b|` is 5.3e-15 kPa, i.e.
+1.8e-17 of the grounded maximum -- machine zero, against the ~1 % of
+grounded drag that a `phi_eff` floor of 0.01 leaves on every shelf node.
+Floating cells are picked out by height above flotation rather than by
+`N <= 0`: `N` is the cancelling difference `p_I - p_W`, so on a shelf it
+is a roundoff residue rather than 0, and an `N <= 0` mask would drop
+exactly the cells a law gated on `N > 0` still acts on.
 
 ## What this buys
 
 - **Exactly zero drag on floating ice.**  `N = max(p_I - p_W, 0)` is built
   from the *model* surface, so it vanishes at precisely the hydrostatic
-  flotation criterion.  No `phi_eff` floor, so no residual shelf drag.
+  flotation criterion, and `budd` additionally gates on the grounded
+  indicator `He` so that the roundoff residue of that cancelling
+  difference cannot be amplified back into shelf drag.  No `phi_eff`
+  floor, so no residual shelf drag.
 - **Grounded-only friction inference.**  `theta` is carried as
   `exp(theta * He)` with `He` a smooth grounded indicator, so `dJ/dtheta`
   is identically zero afloat: an optimiser physically cannot place basal
@@ -103,16 +110,81 @@ clamping `H` there fabricates a spurious `rho g H_floor grad(s)` and blows
 the buffer velocity up.  `momentum_residual` takes `h_floor` and applies
 it only to the `-h M : eps(v)` term.
 
+## Single-layer and multilayer are the same builder
+
+`L = 1` **is** the ordinary single-layer icepack2 dual model: the state
+reduces to `(u, M, tau)` on `V x Sigma x T` and the interlayer loop is
+empty.  So `dual_residual` covers both, and there is no separate
+single-layer code path to keep in step.
+
+`spaces.dual_function_space(mesh, num_layers=1)` builds that space, and
+`test/dual_forms_test.py` checks element-for-element that it reproduces
+what the single-layer consumers write by hand (`Z = V * Sigma * T` in
+`ismip7/antarctica/scripts/diagnostic_solve.py`) -- so adopting the helper
+is not a silent change of discretisation.  Providing it here also means a
+single-layer consumer never has to depend on the multilayer package.
+
+```python
+from icepack_tools.spaces import dual_function_space, layer_thicknesses
+from icepack_tools.friction import weertman_anchor
+from icepack_tools.momentum import dual_residual
+
+Z = dual_function_space(mesh)                    # single layer
+z = Function(Z)                                  # cold start is fine
+F = dual_residual(z, theta, phi, H=H, s=s, b=b,
+                  h_layers=layer_thicknesses(H, 1),
+                  C_w0=weertman_anchor(H, s, u_obs, m, Q),
+                  A_layers=[A], n_consts=[n], n_vals=[3.0],
+                  m_slide=m, mesh=mesh, law="budd")
+```
+
+## Friction laws
+
+Three, selected with `law=`, named to match ismip7's `fric_law`.  All
+share the Weertman branch `tau_W = C_w0 exp(theta He) |u|^(1/m)` and
+differ only in how the bed's strength is capped:
+
+| `law` | `tau_b` | zero afloat |
+|---|---|---|
+| `weertman` | `tau_W` | **no** -- there is no cap |
+| `budd` | `tau_W * He * N_hat`, `N_hat = N/N_ref` normalised | yes -- the `He` gate |
+| `regularized_coulomb` | `tau_W tau_cap / (tau_W + tau_cap)`, `tau_cap = c0 N` | yes -- `N` is a factor |
+
+Budd's zero afloat is enforced by the grounded indicator `He`, not by the
+sign of `N`.  `N` is the cancelling difference `p_I - p_W`, which on a
+shelf is a roundoff residue rather than 0; with a frozen `N_ref` the
+`nhat_floor` term `nhat_floor * p_I / N_ref` would otherwise amplify that
+residue all the way to `nhat_cap`.  `He` is a function of height above
+flotation, so it is zero hundreds of metres below flotation whatever the
+last bits of `N` do -- and it is continuous, which a gate on `N > 0` is
+not.  `regularized_coulomb` needs no such gate: `N` enters as a factor,
+so the residue passes straight through instead of being amplified.
+
+Measured on the test slab (`L = 1`, `n = 3`, cold start, `theta = 0`),
+maximum `|tau_b|` on cells 100 m or more below flotation:
+
+| law | its | max speed | shelf drag |
+|---|---|---|---|
+| `regularized_coulomb` | 22 | 1943.3 m/yr | 7.0e-16 kPa (2.2e-18 of grounded max) |
+| `budd` | 22 | 731.6 m/yr | 2.3e-26 kPa (6.9e-29) |
+| `weertman` | 23 | 356.9 m/yr | 5.7e+00 kPa (1.7e-02) |
+
+Weertman's nonzero shelf drag is correct, not a bug -- it has no
+effective-pressure cap.  The test asserts it *is* nonzero, so that the
+machine-zero assertions on the other two are known to be discriminating
+rather than vacuously true.
+
 ## Modules
 
 | module | contents |
 |---|---|
 | `constants` | physical constants, re-exported from icepack2 |
+| `spaces` | `dual_function_space` (L >= 1), `layer_thicknesses`, `split_layers` |
 | `geometry` | `cg1_lift`, `surface_slope` (CG1 *or* DG0 safe) |
 | `grounding` | `height_above_flotation`, `grounded_mask`, `effective_pressure` |
-| `friction` | `weertman_anchor`, `basal_stress`, `friction_residual`, floor-cell drags |
+| `friction` | `weertman_anchor`, `basal_stress` (3 laws), `friction_residual`, floor-cell drags |
 | `viscosity` | `membrane_residual`, `interlayer_residual` (composite, regularised) |
-| `momentum` | `momentum_residual`, `calving_terminus`, `multilayer_rc_residual` |
+| `momentum` | `momentum_residual`, `calving_terminus`, `dual_residual` (L >= 1) |
 
 ## Calving fronts
 

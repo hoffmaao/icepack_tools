@@ -1,8 +1,10 @@
-r"""Regularised-Coulomb basal friction for the icepack2 dual form.
+r"""Basal friction laws for the icepack2 dual form.
 
-Written as a variational **residual that closes the basal stress
-directly**, not as a dissipation potential.  This is the crux of the
-module, so it is worth stating plainly why.
+Three laws are available -- Weertman, Budd and regularised Coulomb (see
+:data:`LAWS`) -- and all three are written as a variational **residual
+that closes the basal stress directly**, not as a dissipation potential.
+That property is shared, not incidental to any one law, so it is worth
+stating plainly why.
 
 The dual form carries the basal stress :math:`\tau` as an unknown.  The
 usual ``icepack2.model.minimization.friction_power`` closes it through a
@@ -19,11 +21,12 @@ tidewater glacier that limit is not a corner case but the operating
 point: with :math:`u_0 = 300` m/yr, a trunk moving 2000 m/yr sits at
 :math:`r \approx 0.97`, and Newton cannot reach it from :math:`\tau = 0`.
 
-Closing :math:`\tau = \tau_{RC}(u)` as a residual instead makes the
+Closing :math:`\tau = \tau_b(u)` as a residual instead makes the
 basal-stress block of the dual system the **identity** -- perfectly
 conditioned at :math:`\tau = 0` -- and needs no continuation in the
-sliding exponent.  The Coulomb limit is reached through a harmonic blend
-that is smooth everywhere:
+sliding exponent, whichever law supplies :math:`\tau_b`.  For the
+regularised-Coulomb law the Coulomb limit is reached through a harmonic
+blend that is smooth everywhere:
 
 .. math::
     \tau_W   &= C_{w0}\,e^{\theta H_e}\,|u|_{\rm reg}^{1/m}  \\
@@ -32,13 +35,18 @@ that is smooth everywhere:
 
 which is Weertman at low speed, the Coulomb cap at high speed, and
 **exactly zero** where the ice floats, because :math:`N \to 0` there.
+Budd caps the same :math:`\tau_W` by a normalised effective pressure and
+likewise vanishes afloat, there gated by the grounded indicator rather
+than by the sign of :math:`N`; plain Weertman has no :math:`N` factor at
+all, so it keeps drag on floating ice and must be masked if that matters.
 
 Ported and generalised from ``ismip7/icepack2_tools/dual_friction.py``
 (itself derived from ``gia-icepack/scripts/ase_model.py:build_F_rc``).
 """
 
 from firedrake import (
-    Constant, Function, sqrt, inner, exp, max_value, dx,
+    Constant, Function, conditional, dx, exp, gt, inner, max_value, min_value,
+    sqrt,
 )
 
 from .constants import ice_density, gravity
@@ -75,9 +83,44 @@ def weertman_anchor(H, s, u_obs, m_slide, Q, rho_I=ice_density, g=gravity,
     return Function(Q, name=name).interpolate(tau_d / speed ** (1.0 / m_slide))
 
 
-def basal_stress(u, C_w0, theta, H, s, b, m_slide, *, c0=C0, u_min=U_MIN,
-                 eps_tauc=0.0, He=None, gl_width=GL_WIDTH, c_w0_floor=0.0):
-    r"""Regularised-Coulomb basal stress magnitude :math:`\tau_b` (scalar, MPa).
+#: Friction laws this module can close.  All three return a basal-stress
+#: *magnitude*, closed by :func:`friction_residual` into an identity
+#: tau-block, so none of them needs a continuation in the sliding
+#: exponent.  Names match ismip7's ``fric_law``.
+LAWS = ("regularized_coulomb", "budd", "weertman")
+
+
+def basal_stress(u, C_w0, theta, H, s, b, m_slide, *, law="regularized_coulomb",
+                 c0=C0, u_min=U_MIN, eps_tauc=0.0, He=None, gl_width=GL_WIDTH,
+                 c_w0_floor=0.0, N_ref=None, nhat_floor=0.0, nhat_cap=3.0):
+    r"""Basal stress magnitude :math:`\tau_b` (scalar, MPa) for one of :data:`LAWS`.
+
+    All three share the Weertman branch
+
+    .. math::  \tau_W = C_{w0}\,e^{\theta H_e}\,|u|_{\rm reg}^{1/m}
+
+    and differ only in how the bed's strength is capped:
+
+    ``weertman``
+        :math:`\tau_b = \tau_W`.  No cap, so drag does **not** vanish on
+        floating ice by itself -- pair it with a mask if that matters.
+    ``budd``
+        :math:`\tau_b = \tau_W H_e \hat N`, with
+        :math:`\hat N = N/N_{\rm ref}` the *normalised* effective pressure.
+        With ``N_ref=None`` (the inversion geometry) :math:`\hat N = 1` on
+        grounded ice, so the inferred friction is preserved and the
+        effective-pressure feedback is a *relative* change as the geometry
+        evolves.  The grounded indicator :math:`H_e` -- not the sign of
+        :math:`N` -- is what holds :math:`\tau_b` at zero afloat.
+    ``regularized_coulomb``
+        :math:`\tau_b = \tau_W\tau_{\rm cap}/(\tau_W + \tau_{\rm cap})`
+        with :math:`\tau_{\rm cap} = c_0 N`.
+
+    ``budd`` and ``regularized_coulomb`` both give zero drag to machine
+    precision where the ice floats: ``budd`` because :math:`H_e` vanishes
+    there, ``regularized_coulomb`` because :math:`N` enters as a *factor*,
+    so the roundoff residue of :math:`p_I - p_W` passes straight through
+    rather than being amplified.
 
     Parameters
     ----------
@@ -105,10 +148,44 @@ def basal_stress(u, C_w0, theta, H, s, b, m_slide, *, c0=C0, u_min=U_MIN,
         Coercivity floor on ``C_w0``, needed only where the mesh has
         ice-free nodes (``H = 0``) at which both ``C_w0`` and the viscous
         coupling ``H M`` vanish and the velocity loses all coercivity.  It
-        does not leak onto real shelves (those keep ``N = 0``, hence
-        ``tau_b = 0`` exactly) and is absorbed by ``theta`` on grounded ice.
-        Leave at 0 when ``H`` is clamped positive upstream.
+        is absorbed by ``theta`` on grounded ice.  Under ``budd`` and
+        ``regularized_coulomb`` it does not leak onto real shelves either
+        (those keep ``N = 0``, hence ``tau_b = 0`` exactly); under
+        ``weertman`` there is no ``N`` factor, so a floored ``C_w0`` does
+        produce shelf drag.  Leave at 0 when ``H`` is clamped positive
+        upstream.
+    N_ref : Function or None
+        Budd only.  Reference effective pressure for the normalisation.
+        ``None`` uses the current ``N``, giving ``N_hat = 1`` on grounded
+        ice -- correct at the inversion geometry.
+    nhat_floor : float
+        Budd only, and **requires an explicit** ``N_ref``.  PISM-style
+        delta floor on ``N_hat`` as a fraction of local overburden (Bueler
+        & van Pelt 2015 use ~0.02), which removes the frictionless
+        degeneracy near flotation.  The floor evolves with the overburden,
+        so it decays as the ice thins.  0 disables it.
+
+        The floor is measured against ``N_ref``, so it only has PISM
+        semantics when ``N_ref`` is a frozen snapshot.  With
+        ``N_ref=None`` the reference *is* the current ``N``, ``N_hat`` is
+        already identically 1 on grounded ice, and the term would
+        *amplify* near-flotation drag up to ``nhat_cap`` rather than floor
+        anything -- so that combination is rejected outright.
+    nhat_cap : float
+        Budd only.  Upper bound on ``N_hat`` (Joughin's ``reduceNearGLBeta``).
     """
+    if law not in LAWS:
+        raise ValueError(f"unknown friction law {law!r}; expected one of {LAWS}")
+    if law == "budd" and nhat_floor > 0.0 and N_ref is None:
+        raise ValueError(
+            "nhat_floor > 0 requires an explicit N_ref: the PISM floor "
+            "semantics only exist against a frozen N_ref snapshot.  With "
+            "N_ref=None the reference is the current N, so N_hat is "
+            "identically 1 on grounded ice and the floor term "
+            "nhat_floor * p_I / N amplifies near-flotation drag up to "
+            "nhat_cap instead of flooring it.  Pass a frozen N_ref (e.g. the "
+            "inversion-geometry effective pressure) or set nhat_floor=0."
+        )
     if He is None:
         He = grounded_mask(H, b, gl_width=gl_width)
     N = effective_pressure(H, s)
@@ -116,11 +193,40 @@ def basal_stress(u, C_w0, theta, H, s, b, m_slide, *, c0=C0, u_min=U_MIN,
     u_reg = sqrt(inner(u, u) + Constant(u_min) ** 2)
     C_eff = max_value(C_w0, Constant(c_w0_floor)) if c_w0_floor else C_w0
     tau_W = C_eff * exp(theta * He) * u_reg ** (1.0 / m_slide)
-    tau_cap = max_value(Constant(c0) * N, Constant(eps_tauc))
 
-    # Harmonic blend: -> tau_W at low speed, -> tau_cap at high speed, and
-    # -> 0 exactly where N = 0.  The max_value guards 0/0 on the shelf,
-    # where UFL would otherwise poison the Jacobian with a NaN.
+    if law == "weertman":
+        return tau_W
+
+    if law == "budd":
+        # N_hat is the NORMALISED effective pressure, so the inverted
+        # friction is preserved at the reference geometry and the
+        # effective-pressure feedback is a relative change thereafter.
+        # Floor the denominator ALWAYS, not just to guard the exact-zero
+        # branch: UFL evaluates both sides of a conditional, so an
+        # unguarded 0/0 on the shelf poisons the Jacobian with a NaN even
+        # though the conditional selects 0.
+        Nr = max_value(N if N_ref is None else N_ref, Constant(1e-6))
+        N_hat = min_value(N / Nr, Constant(nhat_cap))
+        if nhat_floor > 0.0:
+            p_I = ice_density * gravity * max_value(H, Constant(1.0))
+            N_hat = min_value(max_value(N_hat, Constant(nhat_floor) * p_I / Nr),
+                              Constant(nhat_cap))
+        # He, not the sign of N, is what enforces the zero afloat.  N is
+        # the *cancelling* difference p_I - p_W, which on a shelf is a
+        # roundoff residue rather than exactly 0, so gt(N, 0) lets an
+        # O(1e-16) N through -- and with N_ref equally tiny there, the
+        # floor term nhat_floor * p_I / Nr then amplifies it all the way
+        # to nhat_cap.  He is a function of height above flotation, so it is
+        # 0 hundreds of metres below flotation whatever N's roundoff does,
+        # and it is continuous where the conditional was not.  The
+        # conditional stays as a harmless guard on the sign of N.
+        N_hat = He * conditional(gt(N, Constant(0.0)), N_hat, Constant(0.0))
+        return tau_W * N_hat
+
+    # regularized_coulomb: harmonic blend -> tau_W at low speed, -> tau_cap
+    # at high speed, and -> 0 exactly where N = 0.  The max_value guards
+    # 0/0 on the shelf for the same reason as above.
+    tau_cap = max_value(Constant(c0) * N, Constant(eps_tauc))
     return tau_W * tau_cap / max_value(tau_W + tau_cap, Constant(1e-15))
 
 

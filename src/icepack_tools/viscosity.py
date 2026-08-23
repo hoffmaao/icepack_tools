@@ -126,7 +126,7 @@ def membrane_residual(M, Mt, u, h, A, n, *, A_lin=None, n_val=None,
         prefactor is :math:`A_{\rm reg} = A\tau_c^{n-1}`: that one is a
         numerical device at a *constant* reference thickness.  Note that
         ``A_lin`` is deliberately not scaled by the inverted log-fluidity
-        the way ``A`` usually is -- see ``multilayer_rc_residual``.
+        the way ``A`` usually is -- see ``dual_residual``.
     n_val : float, optional
         The *final* exponent, used to fix the stress-matching power
         :math:`\tau_c^{n-1}` so the regulariser does not move during an
