@@ -151,9 +151,16 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
 
     h_jump_floor : float
         Floor [m] on ``h_above + h_below`` in the interlayer velocity-jump
-        normalisation.  That sum is the total column thickness, so it is
-        exactly zero at ice-free nodes -- an ocean buffer past a calving
-        front -- where the unguarded division makes the residual NaN.
+        normalisation.  That sum is the summed thickness of the two layers
+        meeting at the interface -- ``2H/L`` for ``L`` uniform layers -- so
+        it vanishes with the column and is exactly zero at ice-free nodes,
+        an ocean buffer past a calving front, where the unguarded division
+        makes the residual NaN.  Defaults to
+        :data:`icepack_tools.viscosity.H_JUMP_FLOOR` (1 m), which for
+        uniform layers engages below a column thickness of ``L / 2`` m.
+        It floors nothing but that denominator: not the driving stress,
+        not the effective pressure, not the membrane coupling, which has
+        its own ``h_visc_floor``.
 
     law : str
         One of :data:`icepack_tools.friction.LAWS` -- ``regularized_coulomb``

@@ -110,6 +110,22 @@ clamping `H` there fabricates a spurious `rho g H_floor grad(s)` and blows
 the buffer velocity up.  `momentum_residual` takes `h_floor` and applies
 it only to the `-h M : eps(v)` term.
 
+The interlayer closure needs a second, separate floor.  It normalises the
+velocity jump by `h_above + h_below` -- the summed thickness of the two
+layers meeting at that interface, `2H/L` for `L` uniform layers -- which
+is exactly zero at ice-free nodes.  Any domain buffered seaward past the
+calving front, which is the configuration this readme recommends, has
+them, and the unguarded division makes the residual NaN there: the solve
+dies with `DIVERGED_FUNCTION_NANORINF` before Newton's first step.
+`dual_residual` takes `h_jump_floor` (default `viscosity.H_JUMP_FLOOR`,
+1 m) and applies it **only** to that denominator -- to no physics term,
+not the driving stress, not the effective pressure, not the membrane
+coupling.  There is no ice to shear at those nodes, so any finite value
+serves; the floor exists only to keep the residual finite.  It engages
+once the summed pair drops below it, i.e. below a column thickness of
+`L * h_jump_floor / 2` for uniform layers, so a 10-layer column is
+floored below 5 m rather than below 1 m.
+
 ## Single-layer and multilayer are the same builder
 
 `L = 1` **is** the ordinary single-layer icepack2 dual model: the state
