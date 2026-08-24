@@ -70,6 +70,15 @@ H_REF = 100.0
 #: ~3 orders of magnitude over the alpha-weighted regulariser alone.
 A_DIFFUSION = 1e-3
 
+#: Floor [m] on the summed layer thickness in the interlayer velocity-jump
+#: normalisation.  The closure divides by ``h_above + h_below``, which is
+#: the total column thickness -- exactly zero wherever the domain has
+#: ice-free nodes, e.g. an ocean buffer past a calving front.  Without this
+#: the interlayer residual is NaN there and the solve dies at iteration 0
+#: with DIVERGED_FUNCTION_NANORINF before any Newton step.  This package
+#: is meant to be well posed at zero thickness, so the guard belongs here.
+H_JUMP_FLOOR = 1.0
+
 #: Floor added inside the stress invariants, in MPa^2, i.e. a ~1 kPa stress
 #: floor.  Needed because :math:`(M^2)^{(n-1)/2}` has derivative
 #: :math:`\propto (M^2)^{(n-3)/2}`, which for :math:`n < 3` **diverges** at
@@ -165,7 +174,7 @@ def membrane_residual(M, Mt, u, h, A, n, *, A_lin=None, n_val=None,
 
 def interlayer_residual(S, sigma, u_above, u_below, h_above, h_below, A, n,
                         *, A_lin=None, n_val=None, tau_c=TAU_C, alpha=ALPHA,
-                        stress_eps=STRESS_EPS):
+                        stress_eps=STRESS_EPS, h_jump_floor=H_JUMP_FLOOR):
     r"""Interlayer shear closure with the same linear regularisation.
 
     The multilayer interlayer stress obeys
@@ -192,5 +201,10 @@ def interlayer_residual(S, sigma, u_above, u_below, h_above, h_below, A, n,
     creep = A * Sn + Constant(alpha) * A_reg
     if A_lin is not None:
         creep = creep + A_lin          # diffusion, n = 1, in parallel
-    du = (u_above - u_below) / (h_above + h_below)
+    # Guard the velocity-jump normalisation: h_above + h_below is the total
+    # column thickness and is exactly 0 at ice-free nodes.  There is no ice
+    # to shear there, so any finite value works; the floor simply keeps the
+    # residual finite.
+    du = (u_above - u_below) / max_value(h_above + h_below,
+                                         Constant(h_jump_floor))
     return inner(creep * S - du, sigma) * dx

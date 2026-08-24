@@ -31,7 +31,8 @@ from icepack2 import model as _icepack2_model
 
 from .constants import ice_density, gravity
 from .friction import basal_stress, friction_residual
-from .viscosity import membrane_residual, interlayer_residual
+from .viscosity import (membrane_residual, interlayer_residual,
+                        H_JUMP_FLOOR)
 
 
 def momentum_residual(u, v, M, h, s, H, mesh, *, tau=None, stress_above=None,
@@ -91,6 +92,7 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
                   c_w0_floor=0.0, h_visc_floor=0.0, alpha_gl=0.0,
                   ocean_drag_coeff=0.0, h_ocean=10.0,
                   u_lim=0.0, k_lim=1e-3, gl_width=10.0,
+                  h_jump_floor=H_JUMP_FLOOR,
                   outflow_ids=None):
     r"""Full dual residual for an ``L``-layer column, ``L >= 1``.
 
@@ -146,6 +148,12 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
         bracket at 10 kPa, 80 % at 25 kPa, 33 % at 50 kPa and 6 % at
         100 kPa; for an ``n = 1.8``, ``A = 0.451`` layer it is 10 % at
         10 kPa falling to 2 % at 100 kPa.
+
+    h_jump_floor : float
+        Floor [m] on ``h_above + h_below`` in the interlayer velocity-jump
+        normalisation.  That sum is the total column thickness, so it is
+        exactly zero at ice-free nodes -- an ocean buffer past a calving
+        front -- where the unguarded division makes the residual NaN.
 
     law : str
         One of :data:`icepack_tools.friction.LAWS` -- ``regularized_coulomb``
@@ -239,6 +247,7 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
             h_above=h_layers[l], h_below=h_layers[l - 1],
             A=A_layers[l - 1], n=n_consts[l - 1], n_val=n_vals[l - 1],
             A_lin=A_lin_layers[l - 1], tau_c=tau_c, alpha=alpha,
+            h_jump_floor=h_jump_floor,
         )
     return F
 
