@@ -117,18 +117,29 @@ def main():
     np.testing.assert_allclose(gd, gather(naive_anchor(H, s, u_obs, M_SLIDE, DG)),
                                rtol=1e-14, atol=0.0)
 
+    # A CG1 u_obs must reach Q as its *nodal* speed, not as a patch
+    # average: lifting a field that is already single-valued at a shared
+    # node fixes nothing and silently changes the anchor for every
+    # existing caller.  So build the reference by hand -- lifted tau_d
+    # over the un-lifted nodal speed -- rather than by calling
+    # weertman_anchor again, which would only re-run the same code and
+    # pass whatever it did.  Inverting the continuity test, or lifting
+    # the speed unconditionally, fails here.
+    speed_nodal = max_value(sqrt(inner(u_obs, u_obs)), Constant(1.0))
+    want_cg1 = Function(Q).interpolate(
+        cg1_lift(tau_dg) / speed_nodal ** (1.0 / M_SLIDE))
+    np.testing.assert_allclose(gC, gather(want_cg1), rtol=0.0, atol=0.0)
+
     # A DG0 u_obs against a CG1 Q: now the *speed* is the discontinuous
-    # operand, and it has to be lifted for the same reason tau_d is.  A
-    # CG1 u_obs must not be touched, so check that too -- the lift is
-    # keyed on the operand, not applied blindly.
+    # operand, and it has to be lifted for the same reason tau_d is.
     Vd = VectorFunctionSpace(mesh, "DG", 0)
     u_dg = Function(Vd).interpolate(u_obs)
     C_udg = weertman_anchor(H, s, u_dg, M_SLIDE, Q)
     gu = gather(C_udg)
     assert np.all(gu > 0.0), "the anchor must be strictly positive"
-    np.testing.assert_allclose(
-        gC, gather(weertman_anchor(H, s, u_obs, M_SLIDE, Q)),
-        rtol=0.0, atol=0.0)
+    assert np.abs(gu - gC).max() > 1e-6 * gC.max(), (
+        "the DG0 u_obs anchor is indistinguishable from the CG1 one, so "
+        "the discontinuous-speed path is not being exercised")
 
     ref = os.environ.get("ICEPACK_TOOLS_ANCHOR_REF")
     if ref:                                    # the 3-rank child

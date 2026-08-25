@@ -68,16 +68,23 @@ def _is_continuous(expr):
     r"""Is ``expr`` safe to interpolate straight into a continuous space?
 
     Only if every value it can take at a shared node is single-valued
-    there.  That holds when all of its coefficients live in an :math:`H^1`
-    (or smoother) space and no spatial derivative is taken of them -- a
-    gradient turns a CG1 field cell-wise constant, which is exactly the
-    discontinuity :func:`weertman_anchor` exists to keep out of ``Q``.
-    Coefficient-free expressions (constants, the spatial coordinate) are
-    continuous.
+    there.  That holds when all of its coefficients live in a space at
+    least as smooth as :math:`H^1` and no spatial derivative is taken of
+    them -- a gradient turns a CG1 field cell-wise constant, which is
+    exactly the discontinuity :func:`weertman_anchor` exists to keep out
+    of ``Q``.  Coefficient-free expressions (constants, the spatial
+    coordinate) are continuous.
+
+    The smoothness test is containment, ``<= ufl.H1``, rather than a
+    membership check against a list.  UFL orders ``SobolevSpace`` by
+    inclusion, so that one token covers ``H2``, ``H3``, ``HInf`` and
+    ``H1Div``/``H1Curl`` while still excluding ``L2``, ``HDiv`` and
+    ``HCurl``.  Enumerating instead would patch-average an ``H3`` field
+    that needed no fixing, which is not a no-op.
     """
     if extract_type(expr, Grad):
         return False
-    return all(c.ufl_element().sobolev_space in (ufl.H1, ufl.H2)
+    return all(c.ufl_element().sobolev_space <= ufl.H1
                for c in extract_coefficients(expr))
 
 
@@ -136,7 +143,7 @@ def weertman_anchor(H, s, u_obs, m_slide, Q, rho_I=ice_density, g=gravity,
     grad_s = surface_slope(s)
     tau_d = rho_I * g * H * sqrt(inner(grad_s, grad_s) + Constant(1e-12))
     speed = max_value(sqrt(inner(u_obs, u_obs)), Constant(u_floor))
-    if Q.ufl_element().sobolev_space == ufl.H1:
+    if Q.ufl_element().sobolev_space <= ufl.H1:
         DG = FunctionSpace(Q.mesh(), "DG", 0)
         tau_d = cg1_lift(Function(DG).interpolate(tau_d))
         if not _is_continuous(u_obs):
