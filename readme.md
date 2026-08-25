@@ -82,6 +82,16 @@ Floating cells are picked out by height above flotation rather than by
 is a roundoff residue rather than 0, and an `N <= 0` mask would drop
 exactly the cells a law gated on `N > 0` still acts on.
 
+All three of those figures are insensitive to the friction anchor, which
+is why the `cg1_lift` fix that moved the max speeds above left them
+unchanged.  The cell count is pure geometry -- height above flotation.
+The residual drag is whatever `N` is at those quadrature points, because
+`N` enters `tau_b` as a *factor* and `tau_cap = c0 N` is so far below
+`tau_W` that the harmonic blend saturates at `tau_cap` and `C_w0` divides
+back out.  The friction-law table below moved under the same fix
+precisely because its entries are grounded-ice quantities, where `C_w0`
+multiplies a factor that is nowhere near zero.
+
 ## What this buys
 
 - **Exactly zero drag on floating ice.**  `N = max(p_I - p_W, 0)` is built
