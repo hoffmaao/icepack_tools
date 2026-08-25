@@ -82,15 +82,19 @@ Floating cells are picked out by height above flotation rather than by
 is a roundoff residue rather than 0, and an `N <= 0` mask would drop
 exactly the cells a law gated on `N > 0` still acts on.
 
-All three of those figures are insensitive to the friction anchor, which
-is why the `cg1_lift` fix that moved the max speeds above left them
-unchanged.  The cell count is pure geometry -- height above flotation.
-The residual drag is whatever `N` is at those quadrature points, because
-`N` enters `tau_b` as a *factor* and `tau_cap = c0 N` is so far below
-`tau_W` that the harmonic blend saturates at `tau_cap` and `C_w0` divides
-back out.  The friction-law table below moved under the same fix
-precisely because its entries are grounded-ice quantities, where `C_w0`
-multiplies a factor that is nowhere near zero.
+Afloat, `tau_b` is *analytically* zero rather than small: `N` is clamped
+to `max(p_I - p_W, 0)`, so `tau_cap = max(c0 N, eps_tauc)` is exactly 0
+at the default `eps_tauc = 0`, and the blend `tau_W tau_cap /
+max(tau_W + tau_cap, 1e-15)` is then 0 whatever `tau_W` is -- the point
+of `N` entering as a *factor* rather than through a conditional, since
+there is no threshold to sit on the wrong side of.  The 5.3e-15 kPa is
+therefore roundoff, not residual physics: `tau` is a solved-for unknown,
+so the factorisation returns zero only to its own precision, which is
+why the figure is quoted as the *ratio* 1.8e-17.  That also makes all
+three figures insensitive to this branch's anchor change -- `C_w0`
+multiplies a `tau_W` that is multiplied by zero, and the cell count is
+pure geometry -- whereas the `its` and `max speed` columns below did move,
+because there `C_w0` multiplies something nonzero.
 
 ## What this buys
 
