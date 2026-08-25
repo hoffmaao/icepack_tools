@@ -74,8 +74,8 @@ ramp.  The ramped and direct paths agree to 1.98e-16, so the direct solve
 is not converging somewhere else.
 
 The test also checks the headline property directly: on the 280 cells
-lying 100 m or more below flotation, `|tau_b|` is 5.3e-15 kPa, i.e.
-1.8e-17 of the grounded maximum -- machine zero, against the ~1 % of
+lying 100 m or more below flotation, `|tau_b|` is below 1e-14 kPa, i.e.
+below 1e-16 of the grounded maximum -- machine zero, against the ~1 % of
 grounded drag that a `phi_eff` floor of 0.01 leaves on every shelf node.
 Floating cells are picked out by height above flotation rather than by
 `N <= 0`: `N` is the cancelling difference `p_I - p_W`, so on a shelf it
@@ -87,14 +87,18 @@ to `max(p_I - p_W, 0)`, so `tau_cap = max(c0 N, eps_tauc)` is exactly 0
 at the default `eps_tauc = 0`, and the blend `tau_W tau_cap /
 max(tau_W + tau_cap, 1e-15)` is then 0 whatever `tau_W` is -- the point
 of `N` entering as a *factor* rather than through a conditional, since
-there is no threshold to sit on the wrong side of.  The 5.3e-15 kPa is
-therefore roundoff, not residual physics: `tau` is a solved-for unknown,
-so the factorisation returns zero only to its own precision, which is
-why the figure is quoted as the *ratio* 1.8e-17.  That also makes all
-three figures insensitive to this branch's anchor change -- `C_w0`
-multiplies a `tau_W` that is multiplied by zero, and the cell count is
-pure geometry -- whereas the `its` and `max speed` columns below did move,
-because there `C_w0` multiplies something nonzero.
+there is no threshold to sit on the wrong side of.  What the solve
+returns is therefore roundoff, not residual physics: `tau` is a
+solved-for unknown, so the factorisation reaches that zero only to the
+precision of the system it sits in.  Those digits belong to the linear
+solve and move whenever anything upstream perturbs it -- this branch's
+anchor change among them -- so machine-zero drag is quoted here and in
+the friction-law table below as a *bound* rather than as a measured
+value.  The bound is the property actually being asserted, and it holds
+for any anchor for the reason above: `N` enters `tau_b` as a
+multiplicative factor and is exactly zero afloat.  The cell count is not
+a bound but an exact number -- it is pure geometry, how many cells lie
+100 m or more below flotation.
 
 ## What this buys
 
@@ -196,12 +200,14 @@ not.  `regularized_coulomb` needs no such gate: `N` enters as a factor,
 so the residue passes straight through instead of being amplified.
 
 Measured on the test slab (`L = 1`, `n = 3`, cold start, `theta = 0`),
-maximum `|tau_b|` on cells 100 m or more below flotation:
+maximum `|tau_b|` on cells 100 m or more below flotation.  The two capped
+laws are bounds rather than values, for the reason given above: what the
+solve prints there is its own roundoff on an analytically zero quantity.
 
 | law | its | max speed | shelf drag |
 |---|---|---|---|
-| `regularized_coulomb` | 23 | 2081.3 m/yr | 5.3e-16 kPa (1.7e-18 of grounded max) |
-| `budd` | 23 | 868.6 m/yr | 1.6e-20 kPa (4.9e-23) |
+| `regularized_coulomb` | 23 | 2081.3 m/yr | < 1e-14 kPa (< 1e-16 of grounded max) |
+| `budd` | 23 | 868.6 m/yr | < 1e-18 kPa (< 1e-20) |
 | `weertman` | 22 | 429.2 m/yr | 6.2e+00 kPa (1.9e-02) |
 
 Weertman's nonzero shelf drag is correct, not a bug -- it has no
