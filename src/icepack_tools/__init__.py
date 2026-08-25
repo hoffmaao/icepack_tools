@@ -17,12 +17,13 @@ friction    Weertman/Budd/regularised-Coulomb basal stress, closed as
             a residual
 viscosity   composite membrane and interlayer closures
 momentum    per-layer momentum balance and full single/multi-layer residuals
+parallel    rank-independent field statistics and control-vector gathers
 """
 
 from . import (constants, geometry, grounding, spaces, friction,  # noqa: F401
-               viscosity, momentum)
+               viscosity, momentum, parallel)
 
 __all__ = [
     "constants", "geometry", "grounding", "spaces", "friction", "viscosity",
-    "momentum",
+    "momentum", "parallel",
 ]

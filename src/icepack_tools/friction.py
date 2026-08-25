@@ -44,13 +44,14 @@ Ported and generalised from ``ismip7/icepack2_tools/dual_friction.py``
 (itself derived from ``gia-icepack/scripts/ase_model.py:build_F_rc``).
 """
 
+import ufl
 from firedrake import (
-    Constant, Function, conditional, dx, exp, gt, inner, max_value, min_value,
-    sqrt,
+    Constant, Function, FunctionSpace, conditional, dx, exp, gt, inner,
+    max_value, min_value, sqrt,
 )
 
 from .constants import ice_density, gravity
-from .geometry import surface_slope
+from .geometry import cg1_lift, surface_slope
 from .grounding import effective_pressure, grounded_mask, GL_WIDTH
 
 #: Coulomb-cap coefficient, :math:`\tau_{\rm cap} = c_0 N` (Tsai, Schoof).
@@ -76,9 +77,36 @@ def weertman_anchor(H, s, u_obs, m_slide, Q, rho_I=ice_density, g=gravity,
 
     ``s`` may be CG1 or DG0; :func:`~icepack_tools.geometry.surface_slope`
     handles both.
+
+    The driving stress is reduced to DG0 and lifted before it reaches a
+    continuous ``Q``, and that step is load-bearing, not tidiness.
+    :math:`\nabla s` is **discontinuous** -- cell-wise constant for a CG1
+    surface -- and interpolating a discontinuous expression into a
+    continuous space is not well defined at a shared node: Firedrake
+    evaluates cell by cell and the node keeps whichever cell wrote last,
+    so the value depends on cell numbering, hence on the mesh partition,
+    hence on the MPI rank count.  Straight interpolation gave 77 % of the
+    nodes of a Store mesh a different anchor on 4 ranks than on 1, by up
+    to a factor of 20 at a node, which moved the converged velocity by
+    26 % on 500 m thick ice.  A friction anchor that changes with the rank
+    count makes every result downstream of it unreproducible.
+
+    :func:`~icepack_tools.geometry.cg1_lift` instead gives each node the
+    area-weighted mean of its adjacent cells: well defined, independent of
+    numbering, and a convex combination so it cannot overshoot.  It is
+    biased at the domain boundary, which is acceptable here because this
+    is a *fixed reference scaling* rather than a flux -- the caveat
+    ``cg1_lift`` documents -- and ``theta`` absorbs any offset it leaves.
+
+    Only :math:`\tau_d` goes through DG0; :math:`|u_{\rm obs}|` is already
+    continuous and stays at its nodal values.
     """
     grad_s = surface_slope(s)
     tau_d = rho_I * g * H * sqrt(inner(grad_s, grad_s) + Constant(1e-12))
+    if Q.ufl_element().sobolev_space == ufl.H1:
+        mesh = Q.mesh()
+        DG = FunctionSpace(mesh, "DG", 0)
+        tau_d = cg1_lift(Function(DG).interpolate(tau_d))
     speed = max_value(sqrt(inner(u_obs, u_obs)), Constant(u_floor))
     return Function(Q, name=name).interpolate(tau_d / speed ** (1.0 / m_slide))
 
@@ -243,16 +271,37 @@ def friction_residual(tau, sigma, u, tau_b, u_min=U_MIN):
     return inner(tau + tau_b * u / u_reg, sigma) * dx
 
 
-def ocean_drag(u, H, drag, h_ocean=10.0, u_min=U_MIN):
+def ocean_drag(u, H, drag, h_ocean=10.0, u_min=U_MIN, cellwise=True):
     r"""Linear drag confined to ice-free cells, ramping to zero at ``h_ocean``.
 
     Frictionless floor cells (``C_w0`` and ``N`` both ~0) have no velocity
     coercivity, and a thick front adjacent to them pumps momentum through
     the surface-jump facet term into the degenerate side.  This bounds
-    that without touching real ice.  Exactly zero for ``H >= h_ocean``.
+    that without touching real ice.
+
+    ``cellwise`` is what makes "without touching real ice" true.  The
+    basal stress lives in DG0, so :func:`friction_residual` sets each
+    cell's :math:`\tau` to the cell *average* of this term -- and with a
+    continuous ``H`` the ramp is only **pointwise** zero above
+    ``h_ocean``, so a front cell straddling ``H = h_ocean`` averages in a
+    share of the drag and carries it as if it were bed traction.  On a
+    250 m Store mesh that put up to 338 kPa on cells whose centroid held
+    13-23 m of ice and whose effective pressure was exactly zero, more
+    than the trunk's own driving stress.
+
+    Reducing ``H`` to DG0 first makes the support a union of whole cells,
+    matching the space the stress is resolved in: a cell is ice-free or
+    it is not.  Pass ``cellwise=False`` to keep the pointwise ramp -- for
+    a DG0 ``H``, or a non-``Function`` expression, it is already what you
+    get.
     """
     u_reg = sqrt(inner(u, u) + Constant(u_min) ** 2)
-    ramp = max_value(Constant(0.0), Constant(1.0) - H / Constant(h_ocean))
+    h = H
+    if cellwise and isinstance(H, Function):
+        if H.function_space().ufl_element().sobolev_space == ufl.H1:
+            DG = FunctionSpace(H.function_space().mesh(), "DG", 0)
+            h = Function(DG).interpolate(H)
+    ramp = max_value(Constant(0.0), Constant(1.0) - h / Constant(h_ocean))
     return Constant(drag) * ramp * u_reg
 
 
