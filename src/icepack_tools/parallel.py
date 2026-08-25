@@ -27,22 +27,43 @@ assembly loop.
 drive a distributed control.  Each rank runs the optimiser redundantly
 over the same gathered vector, so every rank takes the same step without
 any inter-rank agreement protocol.
+
+Both are **collective** over the field's communicator and must be called
+on every rank.  That matters because the natural way to fix a rank-local
+print is to move the offending statistic inside an ``if comm.rank == 0:``
+block -- which deadlocks the run rather than failing it.  Gather first on
+every rank, then guard only the ``print``.
 """
 
 import numpy as np
 from firedrake.petsc import PETSc
 
 __all__ = ["gather", "scatter", "gather_vector", "gather_speed", "stats",
-           "format_stats"]
+           "format_stats", "PERCENTILES"]
+
+#: Percentiles reported by default.  Shared by :func:`stats` and
+#: :func:`format_stats` so the two cannot drift apart -- ``format_stats``
+#: silently drops any percentile the dict does not carry.
+PERCENTILES = (50, 90, 99)
 
 
 def gather(f):
     r"""Gather a ``Function``/``Cofunction``'s nodal values onto every rank.
 
-    Returns the full global array, identical on all ranks and identical
-    to what the serial run would hold, so NumPy reductions over it are
-    rank-independent.  For a vector-valued field the array is flat and
-    node-major; use :func:`gather_vector` to get it shaped ``(N, dim)``.
+    Returns the full global array, identical on all ranks, so NumPy
+    reductions over it are rank-independent.  For a vector-valued field
+    the array is flat and node-major; use :func:`gather_vector` to get it
+    shaped ``(N, dim)``.
+
+    It holds the same *set* of values a serial run would hold, but in the
+    parallel DOF ordering: Firedrake renumbers DOFs per partition, so
+    ``gather(f)[i]`` names a different node on 1 rank than on 4.  Safe for
+    reductions, and for a :func:`scatter` round-trip at the *same* rank
+    count; **not** safe for element-wise comparison across rank counts,
+    nor for saving a control vector on one rank count and reloading it on
+    another -- that permutes the control across the mesh with no error.
+    Reorder by ``gather_vector(mesh.coordinates)`` if you need element-wise
+    agreement between rank counts.
 
     Assembled 1-forms (``Cofunction``) gather correctly too: ``assemble``
     has already summed each shared node's contributions into its owner,
@@ -84,7 +105,7 @@ def gather_speed(u):
     return np.linalg.norm(gather_vector(u), axis=1)
 
 
-def stats(values, mask=None, percentiles=(50, 90, 99)):
+def stats(values, mask=None, percentiles=PERCENTILES):
     r"""Rank-independent summary of an already-gathered array.
 
     Pass the output of :func:`gather` / :func:`gather_speed`, optionally
@@ -113,7 +134,7 @@ def stats(values, mask=None, percentiles=(50, 90, 99)):
     return out
 
 
-def format_stats(s, fmt="8.1f", percentiles=(50, 90, 99)):
+def format_stats(s, fmt="8.1f", percentiles=PERCENTILES):
     r"""One-line rendering of a :func:`stats` dict, for report output."""
     if not s["n"]:
         return "(empty)"

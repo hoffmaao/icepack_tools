@@ -22,10 +22,12 @@ So this asserts:
     not to a factor of 20);
   * the naive construction really is partition-dependent on this mesh, so
     the test is pinning a live defect rather than passing vacuously;
-  * lifting is a convex combination -- the CG1 anchor stays inside the
-    cell-wise range, unlike an L2 projection, which can overshoot;
-  * a DG0 target space is passed through untouched, since a discontinuous
-    target has no shared nodes to disagree about.
+  * lifting is a convex combination -- the lifted driving stress stays
+    inside the cell-wise range node for node, unlike an L2 projection,
+    which can overshoot;
+  * a DG0 target space is passed through untouched -- identical to the
+    naive construction -- since a discontinuous target has no shared nodes
+    to disagree about.
 
     python -u anchor_reproducible_test.py      # serial, then re-runs on 3 ranks
 """
@@ -33,6 +35,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 
 import numpy as np
 from firedrake import (
@@ -42,7 +45,7 @@ from firedrake import (
 
 from icepack_tools.constants import ice_density as rho_I, gravity as g
 from icepack_tools.friction import weertman_anchor
-from icepack_tools.geometry import surface_slope
+from icepack_tools.geometry import cg1_lift, surface_slope
 from icepack_tools.parallel import gather, gather_vector
 
 N = 16
@@ -85,14 +88,28 @@ def main():
 
     # ── the lift is a convex combination, so no overshoot ────────────
     DG = FunctionSpace(mesh, "DG", 0)
+    # Only tau_d is lifted, so the exact node-for-node bound is a property
+    # of the lifted tau_d, not of the anchor (which then divides by a
+    # nodal speed).  Assert it where it actually holds: an L2 projection
+    # in place of cg1_lift fails this, a convex combination cannot.
+    grad_s = surface_slope(s)
+    tau_dg = Function(DG).interpolate(
+        rho_I * g * H * sqrt(inner(grad_s, grad_s) + Constant(1e-12)))
+    g_cell, g_lift = gather(tau_dg), gather(cg1_lift(tau_dg))
+    span = g_cell.max() - g_cell.min()
+    assert g_lift.min() >= g_cell.min() - 1e-12 * span, (
+        f"lifted tau_d undershoots the cell-wise range: "
+        f"{g_lift.min():.6g} < {g_cell.min():.6g}")
+    assert g_lift.max() <= g_cell.max() + 1e-12 * span, (
+        f"lifted tau_d overshoots the cell-wise range: "
+        f"{g_lift.max():.6g} > {g_cell.max():.6g}")
+
+    # A DG0 target has no shared nodes, so it must take the naive path
+    # verbatim rather than being routed through the lift.
     C_dg = weertman_anchor(H, s, u_obs, M_SLIDE, DG)
     gd = gather(C_dg)
-    # tau_d is lifted before the division, so the CG1 anchor is not
-    # bounded by the DG0 anchor node for node; what must hold is that it
-    # stays inside the global cell-wise range rather than overshooting it.
-    assert gC.min() >= gd.min() * 0.5 and gC.max() <= gd.max() * 2.0, (
-        f"CG1 anchor [{gC.min():.4g}, {gC.max():.4g}] is far outside the "
-        f"cell-wise range [{gd.min():.4g}, {gd.max():.4g}]")
+    np.testing.assert_allclose(gd, gather(naive_anchor(H, s, u_obs, M_SLIDE, DG)),
+                               rtol=1e-14, atol=0.0)
 
     ref = os.environ.get("ICEPACK_TOOLS_ANCHOR_REF")
     if ref:                                    # the 3-rank child
@@ -126,8 +143,8 @@ def main():
           f"DG0 range [{gd.min():.5g}, {gd.max():.5g}]")
     k = np.lexsort((gather_vector(mesh.coordinates)[:, 1],
                     gather_vector(mesh.coordinates)[:, 0]))
-    out = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                       "_anchor_ref.npz")
+    fd, out = tempfile.mkstemp(prefix="icepack_tools_anchor_", suffix=".npz")
+    os.close(fd)
     np.savez(out, C=gC[k], naive=gn[k])
 
     mpiexec = shutil.which("mpiexec")

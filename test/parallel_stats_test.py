@@ -12,9 +12,12 @@ So the assertions are:
   * :func:`~icepack_tools.parallel.gather` reproduces the analytic
     statistics of a field whose exact min/max/mean/median are known, on
     every rank count;
-  * the *naive* rank-local statistic really does differ under MPI, so
-    this test would have caught the original bug rather than passing
-    vacuously;
+  * on more than one rank the owned DOFs are a *strict partition* of the
+    global set -- which is the whole mechanism behind the bug: no rank
+    holds them all, so every ``f.dat.data_ro.max()`` summarises a subset.
+    The naive value itself is printed rather than asserted on, because
+    whether a given partition happens to hand rank 0 the global extremum
+    is up to the partitioner, not up to this module;
   * :func:`~icepack_tools.parallel.scatter` inverts ``gather`` exactly,
     which is what lets a redundantly-run serial optimiser drive a
     distributed control;
@@ -144,7 +147,7 @@ def check(mesh, Q, V, f, u):
 
 def main():
     mesh, Q, V, f, u = build()
-    s = check(mesh, Q, V, f, u)
+    check(mesh, Q, V, f, u)
 
     if mesh.comm.size > 1 or os.environ.get("ICEPACK_TOOLS_MPI_CHILD"):
         if mesh.comm.rank == 0:

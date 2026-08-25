@@ -70,10 +70,13 @@ def weertman_anchor(H, s, u_obs, m_slide, Q, rho_I=ice_density, g=gravity,
 
     Fixing this as an anchor is what makes ``theta = 0`` a *balanced*
     starting control rather than an arbitrary one: at :math:`u = u_{\rm
-    obs}` and :math:`\theta = 0` the Weertman branch returns exactly
-    :math:`\tau_d`.  The inverted ``theta`` is then an O(1) logarithmic
-    adjustment instead of having to carry the whole friction magnitude,
-    which is both better conditioned and easier to regularise.
+    obs}` and :math:`\theta = 0` the Weertman branch returns the *lifted*
+    :math:`\tau_d` -- the patch-averaged driving stress rather than the
+    pointwise one, so the balance is approximate, measurably so at the
+    domain boundary where the lift's stencil is one-sided.  The inverted
+    ``theta`` is then an O(1) logarithmic adjustment instead of having to
+    carry the whole friction magnitude, which is both better conditioned
+    and easier to regularise.
 
     ``s`` may be CG1 or DG0; :func:`~icepack_tools.geometry.surface_slope`
     handles both.
@@ -269,40 +272,6 @@ def friction_residual(tau, sigma, u, tau_b, u_min=U_MIN):
     """
     u_reg = sqrt(inner(u, u) + Constant(u_min) ** 2)
     return inner(tau + tau_b * u / u_reg, sigma) * dx
-
-
-def ocean_drag(u, H, drag, h_ocean=10.0, u_min=U_MIN, cellwise=True):
-    r"""Linear drag confined to ice-free cells, ramping to zero at ``h_ocean``.
-
-    Frictionless floor cells (``C_w0`` and ``N`` both ~0) have no velocity
-    coercivity, and a thick front adjacent to them pumps momentum through
-    the surface-jump facet term into the degenerate side.  This bounds
-    that without touching real ice.
-
-    ``cellwise`` is what makes "without touching real ice" true.  The
-    basal stress lives in DG0, so :func:`friction_residual` sets each
-    cell's :math:`\tau` to the cell *average* of this term -- and with a
-    continuous ``H`` the ramp is only **pointwise** zero above
-    ``h_ocean``, so a front cell straddling ``H = h_ocean`` averages in a
-    share of the drag and carries it as if it were bed traction.  On a
-    250 m Store mesh that put up to 338 kPa on cells whose centroid held
-    13-23 m of ice and whose effective pressure was exactly zero, more
-    than the trunk's own driving stress.
-
-    Reducing ``H`` to DG0 first makes the support a union of whole cells,
-    matching the space the stress is resolved in: a cell is ice-free or
-    it is not.  Pass ``cellwise=False`` to keep the pointwise ramp -- for
-    a DG0 ``H``, or a non-``Function`` expression, it is already what you
-    get.
-    """
-    u_reg = sqrt(inner(u, u) + Constant(u_min) ** 2)
-    h = H
-    if cellwise and isinstance(H, Function):
-        if H.function_space().ufl_element().sobolev_space == ufl.H1:
-            DG = FunctionSpace(H.function_space().mesh(), "DG", 0)
-            h = Function(DG).interpolate(H)
-    ramp = max_value(Constant(0.0), Constant(1.0) - h / Constant(h_ocean))
-    return Constant(drag) * ramp * u_reg
 
 
 def speed_limiter(u, u_lim, k_lim=1e-3, u_min=U_MIN):
