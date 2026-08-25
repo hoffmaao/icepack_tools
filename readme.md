@@ -74,8 +74,8 @@ ramp.  The ramped and direct paths agree to 1.98e-16, so the direct solve
 is not converging somewhere else.
 
 The test also checks the headline property directly: on the 280 cells
-lying 100 m or more below flotation, `|tau_b|` is below 1e-14 kPa, i.e.
-below 1e-16 of the grounded maximum -- machine zero, against the ~1 % of
+lying 100 m or more below flotation, `|tau_b|` is below 1e-12 kPa, i.e.
+below 1e-14 of the grounded maximum -- machine zero, against the ~1 % of
 grounded drag that a `phi_eff` floor of 0.01 leaves on every shelf node.
 Floating cells are picked out by height above flotation rather than by
 `N <= 0`: `N` is the cancelling difference `p_I - p_W`, so on a shelf it
@@ -96,9 +96,14 @@ anchor change among them -- so machine-zero drag is quoted here and in
 the friction-law table below as a *bound* rather than as a measured
 value.  The bound is the property actually being asserted, and it holds
 for any anchor for the reason above: `N` enters `tau_b` as a
-multiplicative factor and is exactly zero afloat.  The cell count is not
-a bound but an exact number -- it is pure geometry, how many cells lie
-100 m or more below flotation.
+multiplicative factor and is exactly zero afloat.  Every bound quoted is
+the one its test asserts (`SHELF_DRAG_MAX_KPA` and `SHELF_DRAG_MAX_REL`
+in `multilayer_rc_test.py` and `dual_forms_test.py`), so a drift that
+falsifies this readme fails a test rather than going unnoticed; each
+carries two to five decades of headroom over what the solves currently
+print, sized to how far that law's residue has actually been seen to
+move.  The cell count is not a bound but an exact number -- it is pure
+geometry, how many cells lie 100 m or more below flotation.
 
 ## What this buys
 
@@ -206,14 +211,22 @@ solve prints there is its own roundoff on an analytically zero quantity.
 
 | law | its | max speed | shelf drag |
 |---|---|---|---|
-| `regularized_coulomb` | 23 | 2081.3 m/yr | < 1e-14 kPa (< 1e-16 of grounded max) |
-| `budd` | 23 | 868.6 m/yr | < 1e-18 kPa (< 1e-20) |
+| `regularized_coulomb` | 23 | 2081.3 m/yr | < 1e-13 kPa (< 1e-14 of grounded max) |
+| `budd` | 23 | 868.6 m/yr | < 1e-15 kPa (< 1e-18) |
 | `weertman` | 22 | 429.2 m/yr | 6.2e+00 kPa (1.9e-02) |
 
+`budd` keeps its own, much tighter bound because it gates on the grounded
+indicator `He` as well as capping on `N`, so what is left afloat is the
+`tau` solve's own roundoff rather than the cap's -- a single bound loose
+enough to cover both laws would stop testing that.  Its residue is also
+the more volatile: it moved six decades under this branch's anchor
+change, where `regularized_coulomb`'s moved a factor of 1.3, which is why
+it carries the wider margin over what it prints.
+
 Weertman's nonzero shelf drag is correct, not a bug -- it has no
-effective-pressure cap.  The test asserts it *is* nonzero, so that the
-machine-zero assertions on the other two are known to be discriminating
-rather than vacuously true.
+effective-pressure cap.  The test asserts it *is* nonzero (above 1e-6 of
+the grounded maximum), so that the machine-zero assertions on the other
+two are known to be discriminating rather than vacuously true.
 
 ## Modules
 
