@@ -49,6 +49,9 @@ from firedrake import (
     Constant, Function, FunctionSpace, conditional, dx, exp, gt, inner,
     max_value, min_value, sqrt,
 )
+from ufl.algorithms import extract_coefficients
+from ufl.algorithms.analysis import extract_type
+from ufl.differentiation import Grad
 
 from .constants import ice_density, gravity
 from .geometry import cg1_lift, surface_slope
@@ -59,6 +62,23 @@ C0 = 0.5
 
 #: Velocity regularisation [m/yr], keeps the stress finite at ``u = 0``.
 U_MIN = 1.0
+
+
+def _is_continuous(expr):
+    r"""Is ``expr`` safe to interpolate straight into a continuous space?
+
+    Only if every value it can take at a shared node is single-valued
+    there.  That holds when all of its coefficients live in an :math:`H^1`
+    (or smoother) space and no spatial derivative is taken of them -- a
+    gradient turns a CG1 field cell-wise constant, which is exactly the
+    discontinuity :func:`weertman_anchor` exists to keep out of ``Q``.
+    Coefficient-free expressions (constants, the spatial coordinate) are
+    continuous.
+    """
+    if extract_type(expr, Grad):
+        return False
+    return all(c.ufl_element().sobolev_space in (ufl.H1, ufl.H2)
+               for c in extract_coefficients(expr))
 
 
 def weertman_anchor(H, s, u_obs, m_slide, Q, rho_I=ice_density, g=gravity,
@@ -101,16 +121,26 @@ def weertman_anchor(H, s, u_obs, m_slide, Q, rho_I=ice_density, g=gravity,
     is a *fixed reference scaling* rather than a flux -- the caveat
     ``cg1_lift`` documents -- and ``theta`` absorbs any offset it leaves.
 
-    Only :math:`\tau_d` goes through DG0; :math:`|u_{\rm obs}|` is already
-    continuous and stays at its nodal values.
+    Whichever operand is discontinuous is lifted, not just
+    :math:`\tau_d`.  :math:`\nabla s` always is, so :math:`\tau_d` always
+    takes that route into a continuous ``Q``; :math:`|u_{\rm obs}|` takes
+    it only when ``u_obs`` lives in a discontinuous space, which for the
+    usual CG1 observation is never -- the lift is then a no-op and the
+    result is bit-identical to interpolating the nodal speed.  Making the
+    test on the operand rather than on an undocumented caller contract is
+    what keeps the guarantee unconditional: a DG0 ``u_obs`` against a CG1
+    ``Q`` would otherwise put the last-cell-wins node back, silently, and
+    the module already supports a DG0 ``s``, so mixed-space callers are
+    contemplated.
     """
     grad_s = surface_slope(s)
     tau_d = rho_I * g * H * sqrt(inner(grad_s, grad_s) + Constant(1e-12))
-    if Q.ufl_element().sobolev_space == ufl.H1:
-        mesh = Q.mesh()
-        DG = FunctionSpace(mesh, "DG", 0)
-        tau_d = cg1_lift(Function(DG).interpolate(tau_d))
     speed = max_value(sqrt(inner(u_obs, u_obs)), Constant(u_floor))
+    if Q.ufl_element().sobolev_space == ufl.H1:
+        DG = FunctionSpace(Q.mesh(), "DG", 0)
+        tau_d = cg1_lift(Function(DG).interpolate(tau_d))
+        if not _is_continuous(u_obs):
+            speed = cg1_lift(Function(DG).interpolate(speed))
     return Function(Q, name=name).interpolate(tau_d / speed ** (1.0 / m_slide))
 
 

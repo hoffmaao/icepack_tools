@@ -47,6 +47,11 @@ from icepack_tools.parallel import (format_stats, gather, gather_speed,
 #: which makes the reference independent of any serial run.
 N = 12
 
+#: Seconds to allow the 3-rank child.  gather/scatter are collective, so a
+#: regression that computes a statistic on one rank only deadlocks rather
+#: than failing -- without a timeout that hang becomes the test run's.
+CHILD_TIMEOUT = 900.0
+
 
 def build():
     mesh = UnitSquareMesh(N, N)
@@ -162,8 +167,15 @@ def main():
         return 0
 
     env = dict(os.environ, ICEPACK_TOOLS_MPI_CHILD="1", OMP_NUM_THREADS="1")
-    r = subprocess.run([mpiexec, "-n", "3", sys.executable, "-u",
-                        os.path.abspath(__file__)], env=env)
+    try:
+        r = subprocess.run([mpiexec, "-n", "3", sys.executable, "-u",
+                            os.path.abspath(__file__)], env=env,
+                           timeout=CHILD_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise SystemExit(
+            f"the 3-rank run did not finish within {CHILD_TIMEOUT:.0f}s -- a "
+            f"statistic guarded behind a single rank deadlocks the collective "
+            f"gather, so treat the hang as a failure")
     if r.returncode:
         raise SystemExit(f"the 3-rank run failed with {r.returncode}; the "
                          f"statistics are not rank-independent")

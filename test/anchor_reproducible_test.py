@@ -27,7 +27,12 @@ So this asserts:
     which can overshoot;
   * a DG0 target space is passed through untouched -- identical to the
     naive construction -- since a discontinuous target has no shared nodes
-    to disagree about.
+    to disagree about;
+  * the guarantee holds for *whichever* operand is discontinuous, not just
+    for ``tau_d``: a DG0 ``u_obs`` against a CG1 ``Q`` makes the speed the
+    discontinuous factor, and it must be rank-independent too, while a CG1
+    ``u_obs`` must come back bit-identical to interpolating its nodal
+    speed.
 
     python -u anchor_reproducible_test.py      # serial, then re-runs on 3 ranks
 """
@@ -51,6 +56,7 @@ from icepack_tools.parallel import gather, gather_vector
 N = 16
 M_SLIDE = 3.0
 TOL = 1e-9        # cross-rank summation roundoff, not physics
+CHILD_TIMEOUT = 900.0   # seconds; a deadlocked child must fail, not hang
 
 
 def build():
@@ -111,6 +117,19 @@ def main():
     np.testing.assert_allclose(gd, gather(naive_anchor(H, s, u_obs, M_SLIDE, DG)),
                                rtol=1e-14, atol=0.0)
 
+    # A DG0 u_obs against a CG1 Q: now the *speed* is the discontinuous
+    # operand, and it has to be lifted for the same reason tau_d is.  A
+    # CG1 u_obs must not be touched, so check that too -- the lift is
+    # keyed on the operand, not applied blindly.
+    Vd = VectorFunctionSpace(mesh, "DG", 0)
+    u_dg = Function(Vd).interpolate(u_obs)
+    C_udg = weertman_anchor(H, s, u_dg, M_SLIDE, Q)
+    gu = gather(C_udg)
+    assert np.all(gu > 0.0), "the anchor must be strictly positive"
+    np.testing.assert_allclose(
+        gC, gather(weertman_anchor(H, s, u_obs, M_SLIDE, Q)),
+        rtol=0.0, atol=0.0)
+
     ref = os.environ.get("ICEPACK_TOOLS_ANCHOR_REF")
     if ref:                                    # the 3-rank child
         want = np.load(ref)
@@ -120,21 +139,53 @@ def main():
         k = np.lexsort((gather_vector(mesh.coordinates)[:, 1],
                         gather_vector(mesh.coordinates)[:, 0]))
         dC = np.abs(gC[k] - want["C"])
+        du = np.abs(gu[k] - want["C_udg"])
         dn = np.abs(gn[k] - want["naive"])
         rel = dC / np.maximum(np.abs(want["C"]), 1e-300)
+        rel_u = du / np.maximum(np.abs(want["C_udg"]), 1e-300)
         if comm.rank == 0:
             print(f"  [{size} ranks] max |dC| {dC.max():.3e} "
-                  f"(relative {rel.max():.3e}), "
-                  f"naive max |dC| {dn.max():.3e}")
+                  f"(relative {rel.max():.3e}), DG0 u_obs "
+                  f"{rel_u.max():.3e}, naive max |dC| {dn.max():.3e}")
         assert rel.max() < TOL, (
             f"the anchor changed by {rel.max():.2%} between 1 and {size} "
             f"ranks -- it is still partition-dependent")
+        assert rel_u.max() < TOL, (
+            f"with a DG0 u_obs the anchor changed by {rel_u.max():.2%} "
+            f"between 1 and {size} ranks -- the discontinuous speed is "
+            f"reaching the continuous target unlifted")
+        # Unlike parallel_stats_test.py, this test *does* assert that the
+        # naive construction disagrees across rank counts, and the two
+        # cases are not alike.  There the naive quantity is a rank-LOCAL
+        # max, so whether rank 0 owns the global maximum is a coin flip
+        # the partitioner tosses -- one node decides it.  Here the naive
+        # quantity differs at every shared node whose adjacent cells carry
+        # a different grad(s), which on a curved surface is essentially
+        # every interior node.  Neighbouring cell values differ by O(100)
+        # in a range of 118-3406, so for dn.max() to fall below 1e-6 the
+        # 3-rank partition would have to reproduce the serial
+        # last-cell-wins choice at all ~250 of them at once.  That is a
+        # degenerate partition, not luck.
         assert dn.max() > 1e3 * TOL, (
-            "the naive construction agreed across rank counts on this mesh, "
-            "so the test cannot show it bites.  Raise N or change the "
-            "surface -- do not weaken the assertion")
+            "the naive construction agreed with the serial run at every "
+            "shared node, so this 3-rank partition reproduced the serial "
+            "cell numbering throughout.  That means the partition is "
+            "degenerate, not that the defect is gone -- check the "
+            "partitioner rather than weakening the assertion")
         if comm.rank == 0:
             print("  anchor is rank-independent; the naive one is not")
+        return 0
+
+    if size > 1:
+        # Launched under mpiexec by hand, with no reference to compare
+        # against.  The local checks above are the whole test in that
+        # case: recording a reference here would have every rank write its
+        # own temporary file and spawn its own nested `mpiexec -n 3` from
+        # inside an MPI job.
+        if comm.rank == 0:
+            print(f"  [{size} ranks] local checks pass; set "
+                  f"ICEPACK_TOOLS_ANCHOR_REF or run serially for the "
+                  f"cross-rank comparison")
         return 0
 
     # ── serial: record, then re-run on 3 ranks ───────────────────────
@@ -145,7 +196,7 @@ def main():
                     gather_vector(mesh.coordinates)[:, 0]))
     fd, out = tempfile.mkstemp(prefix="icepack_tools_anchor_", suffix=".npz")
     os.close(fd)
-    np.savez(out, C=gC[k], naive=gn[k])
+    np.savez(out, C=gC[k], naive=gn[k], C_udg=gu[k])
 
     mpiexec = shutil.which("mpiexec")
     if mpiexec is None:
@@ -156,7 +207,15 @@ def main():
     env = dict(os.environ, ICEPACK_TOOLS_ANCHOR_REF=out, OMP_NUM_THREADS="1")
     try:
         r = subprocess.run([mpiexec, "-n", "3", sys.executable, "-u",
-                            os.path.abspath(__file__)], env=env)
+                            os.path.abspath(__file__)], env=env,
+                           timeout=CHILD_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        # A regression here is as likely to hang as to fail: gather is
+        # collective, so a statistic computed on one rank only deadlocks
+        # the run.  Without the timeout that hang is the test run's.
+        raise SystemExit(
+            f"the 3-rank run did not finish within {CHILD_TIMEOUT:.0f}s -- "
+            f"treat a hang as a failure, not as a slow machine")
     finally:
         os.remove(out)
     if r.returncode:

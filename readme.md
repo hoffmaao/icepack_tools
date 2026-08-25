@@ -70,7 +70,7 @@ fixed at its target in every case:
 So: the residual friction closure removes the `m`-continuation, and
 diffusion creep removes the `n`-continuation.  Together **the whole
 continuation apparatus disappears** -- one cold solve replaces a staged
-ramp.  The ramped and direct paths agree to 2.0e-16, so the direct solve
+ramp.  The ramped and direct paths agree to 1.98e-16, so the direct solve
 is not converging somewhere else.
 
 The test also checks the headline property directly: on the 280 cells
@@ -95,9 +95,14 @@ exactly the cells a law gated on `N > 0` still acts on.
   is identically zero afloat: an optimiser physically cannot place basal
   friction on a shelf.
 - **A balanced starting control.**  The anchor `C_w0 = tau_d / |u_obs|^(1/m)`
-  makes the Weertman branch return exactly `tau_d` at `u = u_obs, theta = 0`,
-  so `theta` is an O(1) log-adjustment rather than carrying the whole
-  friction magnitude.
+  makes the Weertman branch return the *lifted* `tau_d` at
+  `u = u_obs, theta = 0` -- the patch-averaged driving stress rather than
+  the pointwise one, since `grad(s)` is discontinuous and cannot be
+  interpolated into a continuous space without the answer following the
+  mesh partition.  The balance is therefore approximate, measurably so at
+  the domain boundary where the lift's stencil is one-sided, but `theta`
+  is still an O(1) log-adjustment rather than carrying the whole friction
+  magnitude.
 - **Positive-definite membrane block as `h -> 0`.**  The composite flow law
   adds a small linear term at a *constant* reference thickness, so calving
   fronts, nunataks and ocean buffers stay well posed.
@@ -181,9 +186,9 @@ maximum `|tau_b|` on cells 100 m or more below flotation:
 
 | law | its | max speed | shelf drag |
 |---|---|---|---|
-| `regularized_coulomb` | 22 | 1943.3 m/yr | 7.0e-16 kPa (2.2e-18 of grounded max) |
-| `budd` | 22 | 731.6 m/yr | 2.3e-26 kPa (6.9e-29) |
-| `weertman` | 23 | 356.9 m/yr | 5.7e+00 kPa (1.7e-02) |
+| `regularized_coulomb` | 23 | 2081.3 m/yr | 5.3e-16 kPa (1.7e-18 of grounded max) |
+| `budd` | 23 | 868.6 m/yr | 1.6e-20 kPa (4.9e-23) |
+| `weertman` | 22 | 429.2 m/yr | 6.2e+00 kPa (1.9e-02) |
 
 Weertman's nonzero shelf drag is correct, not a bug -- it has no
 effective-pressure cap.  The test asserts it *is* nonzero, so that the
@@ -198,9 +203,10 @@ rather than vacuously true.
 | `spaces` | `dual_function_space` (L >= 1), `layer_thicknesses`, `split_layers` |
 | `geometry` | `cg1_lift`, `surface_slope` (CG1 *or* DG0 safe) |
 | `grounding` | `height_above_flotation`, `grounded_mask`, `effective_pressure` |
-| `friction` | `weertman_anchor`, `basal_stress` (3 laws), `friction_residual`, floor-cell drags |
+| `friction` | `weertman_anchor` (partition-independent), `basal_stress` (3 laws), `friction_residual`, `speed_limiter` |
 | `viscosity` | `membrane_residual`, `interlayer_residual` (composite, regularised) |
 | `momentum` | `momentum_residual`, `calving_terminus`, `dual_residual` (L >= 1) |
+| `parallel` | `gather`/`scatter`, `gather_vector`, `gather_speed`, `stats`, `format_stats` |
 
 ## Calving fronts
 
