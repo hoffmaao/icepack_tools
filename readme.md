@@ -62,15 +62,15 @@ fixed at its target in every case:
 
 | diffusion (n=1) | n | result | max speed |
 |---|---|---|---|
-| off | ramped 1 -> n | converged, 42 its | 1132.5 m/yr |
+| off | ramped 1 -> n | converged, 42 its | 1147.3 m/yr |
 | off | **direct** | **diverges** | -- |
-| 1e-3 | ramped 1 -> n | converged, 41 its | 1136.1 m/yr |
-| 1e-3 | **direct** | **converged, 46 its** | 1136.1 m/yr |
+| 1e-3 | ramped 1 -> n | converged, 41 its | 1151.0 m/yr |
+| 1e-3 | **direct** | **converged, 47 its** | 1151.0 m/yr |
 
 So: the residual friction closure removes the `m`-continuation, and
 diffusion creep removes the `n`-continuation.  Together **the whole
 continuation apparatus disappears** -- one cold solve replaces a staged
-ramp.  The ramped and direct paths agree to 7.9e-12, so the direct solve
+ramp.  The ramped and direct paths agree to 2.0e-16, so the direct solve
 is not converging somewhere else.
 
 The test also checks the headline property directly: on the 280 cells
