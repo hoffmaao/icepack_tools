@@ -19,6 +19,10 @@ Claims the other icepack repos would rely on:
     not, and Budd's PISM floor is only accepted where it means what it
     says (against a frozen ``N_ref``), where its amplification and its
     grounding-line jump are then pinned.
+  * a column that goes genuinely ice-free -- ``H = 0``, as an ocean
+    buffer seaward of the calving front is -- still assembles a finite
+    multilayer residual, and does so *because* of ``h_jump_floor``:
+    turn the floor off and the same assembly is NaN.
 
     python -u dual_forms_test.py
 """
@@ -39,7 +43,7 @@ from icepack_tools.momentum import dual_residual
 from icepack_tools.spaces import (
     dual_function_space, layer_thicknesses, split_layers,
 )
-from icepack_tools.viscosity import A_DIFFUSION
+from icepack_tools.viscosity import A_DIFFUSION, H_JUMP_FLOOR
 
 M_SLIDE = 3.0
 FC = {"quadrature_degree": 4}
@@ -173,6 +177,81 @@ def shelf_drag(mesh, Q, H, b, s, z, haf_afloat=-100.0):
     assert afloat.any(), "geometry has no floating cells; test is vacuous"
     return (float(np.abs(tb.dat.data_ro[afloat]).max()),
             float(np.abs(tb.dat.data_ro).max()))
+
+
+def build_ice_free_case(num_layers, h_jump_floor, nx=20, Lx=40e3):
+    """Same slab, but calving at 0.6 Lx so the buffer beyond it is ice-free.
+
+    ``H`` is clamped at exactly 0 rather than tapered to a positive
+    minimum, which is what an ocean buffer seaward of the front actually
+    is and what every other case here fails to be.  Nothing else changes:
+    the surface follows the flotation rule, so the ice-free buffer has
+    ``s = max(b, 0) = 0``.
+    """
+    mesh, Q, H, b, s, u_obs = build(nx=nx, Lx=Lx)
+    x, y = SpatialCoordinate(mesh)
+    H.interpolate(max_value(
+        Constant(900.0) * (Constant(1.0) - x / Constant(0.6 * Lx)),
+        Constant(0.0)))
+    s.interpolate(max_value(b + H, Constant(1.0 - rho_I / rho_W) * H))
+
+    n_ice_free = int((H.dat.data_ro == 0.0).sum())
+    assert n_ice_free > 0, "no ice-free vertices; the test would be vacuous"
+
+    Z = dual_function_space(mesh, num_layers)
+    z = Function(Z)                                    # cold start
+    F = dual_residual(
+        z, Function(Q), Function(Q), H=H, s=s, b=b,
+        h_layers=layer_thicknesses(H, num_layers),
+        C_w0=weertman_anchor(H, s, u_obs, M_SLIDE, Q),
+        A_layers=[Constant(20.0)] * num_layers,
+        n_consts=[Constant(3.0)] * num_layers, n_vals=[3.0] * num_layers,
+        A_lin_layers=[Constant(A_DIFFUSION)] * num_layers,
+        m_slide=M_SLIDE, mesh=mesh, h_visc_floor=10.0, c_w0_floor=1e-6,
+        h_jump_floor=h_jump_floor,
+    )
+    r = firedrake.assemble(F, form_compiler_parameters=FC)
+    blocks = [np.asarray(d) for d in r.dat.data_ro]
+    return n_ice_free, blocks
+
+
+def test_ice_free_column_is_finite(num_layers=2):
+    """H = 0 must give a finite residual -- and the floor must be why.
+
+    The interlayer closure divides the velocity jump by ``h_above +
+    h_below``, the summed thickness of the two layers meeting at the
+    interface.  That is exactly 0 where there is no ice, and at a cold
+    start the numerator is 0 too, so the unguarded quotient is 0/0: the
+    residual is NaN before Newton takes a step and the solve dies with
+    DIVERGED_FUNCTION_NANORINF at iteration 0.  ``h_jump_floor`` bounds
+    that denominator away from 0 and nothing else.
+
+    Both halves are asserted.  Finite-with-the-floor alone would pass
+    just as happily if the geometry had no ice-free node, so the same
+    assembly is repeated with ``h_jump_floor = 0`` and *required* to go
+    NaN -- if it does not, this test is not testing the guard.
+    """
+    n_ice_free, blocks = build_ice_free_case(num_layers, H_JUMP_FLOOR)
+    for i, blk in enumerate(blocks):
+        bad = int((~np.isfinite(blk)).sum())
+        assert bad == 0, (
+            f"block {i} of the L={num_layers} residual has {bad} non-finite "
+            f"entries at {n_ice_free} ice-free vertices")
+    print(f"  L={num_layers}, {n_ice_free} ice-free vertices: all "
+          f"{sum(b.size for b in blocks):,} residual entries finite")
+
+    _, unguarded = build_ice_free_case(num_layers, 0.0)
+    nan_blocks = {i: int((~np.isfinite(b)).sum())
+                  for i, b in enumerate(unguarded) if not np.isfinite(b).all()}
+    assert nan_blocks, (
+        "h_jump_floor = 0 assembled cleanly, so the guard is not what keeps "
+        "the residual finite and this test proves nothing")
+    interlayer = {3 * l + 2 for l in range(1, num_layers)}
+    assert set(nan_blocks) <= interlayer, (
+        f"NaNs outside the interlayer-stress blocks {sorted(interlayer)}: "
+        f"{nan_blocks} -- something other than the jump division divides by H")
+    print(f"  with h_jump_floor = 0 the same assembly is NaN in "
+          f"{', '.join(f'block {i} ({c} entries)' for i, c in nan_blocks.items())}")
 
 
 def test_layer_count_guards():
@@ -365,10 +444,13 @@ def main():
     print(f"  n=4/1.8, cold start, converged in {its} its; "
           f"shear {np.abs(sp_t - sp_b).max():.1f} m/yr")
 
-    print("\n6. the entry points police their own layer count")
+    print("\n6. an ice-free column still assembles a finite residual")
+    test_ice_free_column_is_finite()
+
+    print("\n7. the entry points police their own layer count")
     test_layer_count_guards()
 
-    print("\n7. budd's PISM floor only where it means what it says")
+    print("\n8. budd's PISM floor only where it means what it says")
     test_budd_nhat_floor()
 
     print("\nPASS: one builder covers L=1 and L>1 and all three friction laws")

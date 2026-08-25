@@ -70,6 +70,21 @@ H_REF = 100.0
 #: ~3 orders of magnitude over the alpha-weighted regulariser alone.
 A_DIFFUSION = 1e-3
 
+#: Floor [m] on the summed layer thickness in the interlayer velocity-jump
+#: normalisation.  The closure divides by ``h_above + h_below``, the summed
+#: thickness of the two layers meeting at that interface -- ``2H/L`` for
+#: ``L`` uniform layers, and so exactly zero wherever the domain has
+#: ice-free nodes, e.g. an ocean buffer past a calving front.  Without this
+#: the interlayer residual is NaN there and the solve dies at iteration 0
+#: with DIVERGED_FUNCTION_NANORINF before any Newton step.  This package
+#: is meant to be well posed at zero thickness, so the guard belongs here.
+#:
+#: The floor engages once that sum drops below it, i.e. below a column
+#: thickness of ``L * H_JUMP_FLOOR / 2`` for uniform layers -- 1 m for
+#: ``L = 2`` but 5 m for ``L = 10``.  Pick it against the thinnest column
+#: whose shear should still be resolved, not against 1 m of ice.
+H_JUMP_FLOOR = 1.0
+
 #: Floor added inside the stress invariants, in MPa^2, i.e. a ~1 kPa stress
 #: floor.  Needed because :math:`(M^2)^{(n-1)/2}` has derivative
 #: :math:`\propto (M^2)^{(n-3)/2}`, which for :math:`n < 3` **diverges** at
@@ -165,7 +180,7 @@ def membrane_residual(M, Mt, u, h, A, n, *, A_lin=None, n_val=None,
 
 def interlayer_residual(S, sigma, u_above, u_below, h_above, h_below, A, n,
                         *, A_lin=None, n_val=None, tau_c=TAU_C, alpha=ALPHA,
-                        stress_eps=STRESS_EPS):
+                        stress_eps=STRESS_EPS, h_jump_floor=H_JUMP_FLOOR):
     r"""Interlayer shear closure with the same linear regularisation.
 
     The multilayer interlayer stress obeys
@@ -176,9 +191,13 @@ def interlayer_residual(S, sigma, u_above, u_below, h_above, h_below, A, n,
 
     whose Jacobian shares the :math:`|S|^{n-1}` degeneracy at ``S = 0``.
     The regulariser is stress-matched the same way.  Unlike the membrane
-    term this one needs no reference thickness: the layer thicknesses
-    appear in the velocity-jump normalisation, not as a prefactor that can
-    vanish.
+    term the layer thicknesses enter as a denominator rather than as a
+    prefactor, so no reference thickness is needed for coercivity -- but
+    that denominator does vanish with the column, and unguarded it makes
+    the residual NaN at ice-free nodes.  ``h_jump_floor`` [m] floors
+    :math:`h^{l+1} + h^l` in that normalisation and nowhere else; see
+    :data:`H_JUMP_FLOOR` for the default and for the column thickness at
+    which it engages.
 
     ``A_lin`` is the optional diffusion-creep (:math:`n = 1`) prefactor,
     the same mechanism ``membrane_residual`` takes and again distinct from
@@ -192,5 +211,10 @@ def interlayer_residual(S, sigma, u_above, u_below, h_above, h_below, A, n,
     creep = A * Sn + Constant(alpha) * A_reg
     if A_lin is not None:
         creep = creep + A_lin          # diffusion, n = 1, in parallel
-    du = (u_above - u_below) / (h_above + h_below)
+    # Guard the velocity-jump normalisation: h_above + h_below is the summed
+    # thickness of the two adjacent layers, so it vanishes with the column
+    # and is exactly 0 at ice-free nodes.  There is no ice to shear there,
+    # so any finite value works; the floor simply keeps the residual finite.
+    du = (u_above - u_below) / max_value(h_above + h_below,
+                                         Constant(h_jump_floor))
     return inner(creep * S - du, sigma) * dx
