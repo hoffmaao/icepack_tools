@@ -47,6 +47,18 @@ A_VALS = [46.0, 0.45]
 M_SLIDE = 3.0
 N_RAMP = 6
 
+# Bounds on machine-zero shelf drag, quoted verbatim in readme.md so the two
+# cannot disagree.  Afloat, tau_b is *analytically* zero: N is clamped to
+# max(p_I - p_W, 0) and enters tau_b as a multiplicative factor, so there is
+# no threshold to sit on the wrong side of.  tau is a solved-for unknown
+# though, so what comes back is the linear solve's roundoff on that zero --
+# it tracks the conditioning of the system and drifts whenever anything
+# upstream perturbs it.  Hence a bound with room for that drift, not the
+# printed value: the assertion is meant to catch the factor ceasing to be
+# exactly zero, not roundoff moving a decade.
+SHELF_DRAG_MAX_KPA = 1e-12   # observed 5.3e-15 kPa
+SHELF_DRAG_MAX_REL = 1e-14   # observed 1.8e-17 of the grounded maximum
+
 SPARAMS = {
     "snes_type": "newtonls", "snes_max_it": 100,
     "snes_linesearch_type": "nleqerr",
@@ -209,8 +221,17 @@ def main():
     scale = max(float(np.abs(tb_dg.dat.data_ro).max()), 1e-300)
     rel = worst / scale
     print(f"  max |tau_b| there: {1e3*worst:.3e} kPa "
-          f"({rel:.1e} of grounded max -- machine zero)")
-    assert rel < 1e-12, f"basal drag leaked onto floating ice: {rel:.2e}"
+          f"({rel:.1e} of grounded max -- machine zero, bounds "
+          f"{SHELF_DRAG_MAX_KPA:g} kPa / {SHELF_DRAG_MAX_REL:g})")
+    why = ("N is clamped to max(p_I - p_W, 0) and enters tau_b as a "
+           "multiplicative factor, so afloat tau_b is exactly zero and only "
+           "the solve's roundoff on that zero should appear here")
+    assert 1e3 * worst < SHELF_DRAG_MAX_KPA, (
+        f"basal drag leaked onto floating ice: {1e3*worst:.2e} kPa exceeds "
+        f"the machine-zero bound {SHELF_DRAG_MAX_KPA:g} kPa.  {why}")
+    assert rel < SHELF_DRAG_MAX_REL, (
+        f"basal drag leaked onto floating ice: {rel:.2e} of the grounded "
+        f"maximum exceeds the bound {SHELF_DRAG_MAX_REL:g}.  {why}")
 
     print("\nPASS: with diffusion creep the composite solves cold and direct,")
     print("      no continuation in n and none in m")

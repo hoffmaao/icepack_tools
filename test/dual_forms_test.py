@@ -46,6 +46,33 @@ from icepack_tools.spaces import (
 from icepack_tools.viscosity import A_DIFFUSION, H_JUMP_FLOOR
 
 M_SLIDE = 3.0
+
+# Bounds on machine-zero shelf drag, quoted verbatim in readme.md so the two
+# cannot disagree.  Afloat, tau_b is *analytically* zero for a capped law: N
+# is clamped to max(p_I - p_W, 0) and enters tau_b as a multiplicative factor,
+# so there is no threshold to sit on the wrong side of.  tau is a solved-for
+# unknown though, so what comes back is the linear solve's roundoff on that
+# zero -- it drifts whenever anything upstream perturbs the system, hence a
+# bound with room for that rather than the printed value.
+#
+# budd is kept orders tighter because it gates on the grounded indicator He as
+# well as capping on N, so its shelf residue is the tau solve's own roundoff
+# rather than the cap's; a single bound loose enough for both would stop
+# testing that.  Its residue is also the more volatile of the two -- it moved
+# six decades under this branch's anchor change, where the coulomb one moved a
+# factor of 1.3 -- so it carries the wider margin.
+SHELF_DRAG_MAX_KPA = {              # observed:
+    "regularized_coulomb": 1e-13,   #   5.3e-16 kPa
+    "budd": 1e-15,                  #   1.6e-20 kPa
+}
+SHELF_DRAG_MAX_REL = {              # observed, as a fraction of grounded max:
+    "regularized_coulomb": 1e-14,   #   1.7e-18
+    "budd": 1e-18,                  #   4.9e-23
+}
+# weertman has no effective-pressure cap, so it must NOT be machine zero --
+# without this the two bounds above could pass vacuously.
+SHELF_DRAG_MIN_REL_UNCAPPED = 1e-6  # observed 1.9e-02
+
 FC = {"quadrature_degree": 4}
 SPARAMS = {
     "snes_type": "newtonls", "snes_max_it": 100,
@@ -417,20 +444,31 @@ def main():
     print("\n4. every friction law closes and solves (L = 1, n = 3)")
     print(f"  {'law':<22} {'its':>4} {'max speed':>12} {'shelf drag':>26}")
     print("  " + "-" * 68)
-    shelf = {}
+    shelf, shelf_kpa = {}, {}
     for law in LAWS:
         mesh, Q, H, b, s, z, its = solve_case(1, law, [3.0], [20.0])
         sp = np.hypot(*z.subfunctions[0].dat.data_ro.T).max()
         worst, scale = shelf_drag(mesh, Q, H, b, s, z)
         shelf[law] = worst / max(scale, 1e-300)
+        shelf_kpa[law] = 1e3 * worst
         print(f"  {law:<22} {its:>4} {sp:>9.1f} m/yr "
-              f"{1e3*worst:>13.3e} kPa ({shelf[law]:.1e})")
+              f"{shelf_kpa[law]:>13.3e} kPa ({shelf[law]:.1e})")
 
     # the capped laws must be exactly zero afloat; weertman has no cap, so
     # asserting it is nonzero keeps the other two assertions meaningful
-    for law in ("regularized_coulomb", "budd"):
-        assert shelf[law] < 1e-12, f"{law} leaked drag onto floating ice"
-    assert shelf["weertman"] > 1e-6, (
+    why = ("N is clamped to max(p_I - p_W, 0) and enters tau_b as a "
+           "multiplicative factor, so afloat tau_b is exactly zero and only "
+           "the solve's roundoff on that zero should appear here")
+    for law in SHELF_DRAG_MAX_KPA:
+        assert shelf_kpa[law] < SHELF_DRAG_MAX_KPA[law], (
+            f"{law} leaked drag onto floating ice: {shelf_kpa[law]:.2e} kPa "
+            f"exceeds the machine-zero bound "
+            f"{SHELF_DRAG_MAX_KPA[law]:g} kPa.  {why}")
+        assert shelf[law] < SHELF_DRAG_MAX_REL[law], (
+            f"{law} leaked drag onto floating ice: {shelf[law]:.2e} of the "
+            f"grounded maximum exceeds the bound "
+            f"{SHELF_DRAG_MAX_REL[law]:g}.  {why}")
+    assert shelf["weertman"] > SHELF_DRAG_MIN_REL_UNCAPPED, (
         "weertman has no effective-pressure cap, so it should NOT be zero "
         "afloat; if it is, the shelf check is not discriminating")
     print("\n  capped laws are machine-zero afloat; weertman is not, as expected")

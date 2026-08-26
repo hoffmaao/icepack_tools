@@ -90,7 +90,6 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
                   H_ref=100.0, A_lin_layers=None, c0=0.5, u_min=1.0,
                   eps_tauc=0.0, N_ref=None, nhat_floor=0.0, nhat_cap=3.0,
                   c_w0_floor=0.0, h_visc_floor=0.0, alpha_gl=0.0,
-                  ocean_drag_coeff=0.0, h_ocean=10.0,
                   u_lim=0.0, k_lim=1e-3, gl_width=10.0,
                   h_jump_floor=H_JUMP_FLOOR,
                   outflow_ids=None):
@@ -236,9 +235,6 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
                          gl_width=gl_width, c_w0_floor=c_w0_floor,
                          N_ref=N_ref, nhat_floor=nhat_floor,
                          nhat_cap=nhat_cap)
-    if ocean_drag_coeff > 0.0:
-        from .friction import ocean_drag
-        tau_b = tau_b + ocean_drag(u_b, H, ocean_drag_coeff, h_ocean, u_min)
     if u_lim > 0.0:
         from .friction import speed_limiter
         tau_b = tau_b + speed_limiter(u_b, u_lim, k_lim, u_min)

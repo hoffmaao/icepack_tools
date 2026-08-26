@@ -44,13 +44,17 @@ Ported and generalised from ``ismip7/icepack2_tools/dual_friction.py``
 (itself derived from ``gia-icepack/scripts/ase_model.py:build_F_rc``).
 """
 
+import ufl
 from firedrake import (
-    Constant, Function, conditional, dx, exp, gt, inner, max_value, min_value,
-    sqrt,
+    Constant, Function, FunctionSpace, conditional, dx, exp, gt, inner,
+    max_value, min_value, sqrt,
 )
+from ufl.algorithms import extract_coefficients
+from ufl.algorithms.analysis import extract_type
+from ufl.differentiation import Grad
 
 from .constants import ice_density, gravity
-from .geometry import surface_slope
+from .geometry import cg1_lift, surface_slope
 from .grounding import effective_pressure, grounded_mask, GL_WIDTH
 
 #: Coulomb-cap coefficient, :math:`\tau_{\rm cap} = c_0 N` (Tsai, Schoof).
@@ -58,6 +62,30 @@ C0 = 0.5
 
 #: Velocity regularisation [m/yr], keeps the stress finite at ``u = 0``.
 U_MIN = 1.0
+
+
+def _is_continuous(expr):
+    r"""Is ``expr`` safe to interpolate straight into a continuous space?
+
+    Only if every value it can take at a shared node is single-valued
+    there.  That holds when all of its coefficients live in a space at
+    least as smooth as :math:`H^1` and no spatial derivative is taken of
+    them -- a gradient turns a CG1 field cell-wise constant, which is
+    exactly the discontinuity :func:`weertman_anchor` exists to keep out
+    of ``Q``.  Coefficient-free expressions (constants, the spatial
+    coordinate) are continuous.
+
+    The smoothness test is containment, ``<= ufl.H1``, rather than a
+    membership check against a list.  UFL orders ``SobolevSpace`` by
+    inclusion, so that one token covers ``H2``, ``H3``, ``HInf`` and
+    ``H1Div``/``H1Curl`` while still excluding ``L2``, ``HDiv`` and
+    ``HCurl``.  Enumerating instead would patch-average an ``H3`` field
+    that needed no fixing, which is not a no-op.
+    """
+    if extract_type(expr, Grad):
+        return False
+    return all(c.ufl_element().sobolev_space <= ufl.H1
+               for c in extract_coefficients(expr))
 
 
 def weertman_anchor(H, s, u_obs, m_slide, Q, rho_I=ice_density, g=gravity,
@@ -69,17 +97,57 @@ def weertman_anchor(H, s, u_obs, m_slide, Q, rho_I=ice_density, g=gravity,
 
     Fixing this as an anchor is what makes ``theta = 0`` a *balanced*
     starting control rather than an arbitrary one: at :math:`u = u_{\rm
-    obs}` and :math:`\theta = 0` the Weertman branch returns exactly
-    :math:`\tau_d`.  The inverted ``theta`` is then an O(1) logarithmic
-    adjustment instead of having to carry the whole friction magnitude,
-    which is both better conditioned and easier to regularise.
+    obs}` and :math:`\theta = 0` the Weertman branch returns the *lifted*
+    :math:`\tau_d` -- the patch-averaged driving stress rather than the
+    pointwise one, so the balance is approximate, measurably so at the
+    domain boundary where the lift's stencil is one-sided.  The inverted
+    ``theta`` is then an O(1) logarithmic adjustment instead of having to
+    carry the whole friction magnitude, which is both better conditioned
+    and easier to regularise.
 
     ``s`` may be CG1 or DG0; :func:`~icepack_tools.geometry.surface_slope`
     handles both.
+
+    The driving stress is reduced to DG0 and lifted before it reaches a
+    continuous ``Q``, and that step is load-bearing, not tidiness.
+    :math:`\nabla s` is **discontinuous** -- cell-wise constant for a CG1
+    surface -- and interpolating a discontinuous expression into a
+    continuous space is not well defined at a shared node: Firedrake
+    evaluates cell by cell and the node keeps whichever cell wrote last,
+    so the value depends on cell numbering, hence on the mesh partition,
+    hence on the MPI rank count.  Straight interpolation gave 77 % of the
+    nodes of a Store mesh a different anchor on 4 ranks than on 1, by up
+    to a factor of 20 at a node, which moved the converged velocity by
+    26 % on 500 m thick ice.  A friction anchor that changes with the rank
+    count makes every result downstream of it unreproducible.
+
+    :func:`~icepack_tools.geometry.cg1_lift` instead gives each node the
+    area-weighted mean of its adjacent cells: well defined, independent of
+    numbering, and a convex combination so it cannot overshoot.  It is
+    biased at the domain boundary, which is acceptable here because this
+    is a *fixed reference scaling* rather than a flux -- the caveat
+    ``cg1_lift`` documents -- and ``theta`` absorbs any offset it leaves.
+
+    Whichever operand is discontinuous is lifted, not just
+    :math:`\tau_d`.  :math:`\nabla s` always is, so :math:`\tau_d` always
+    takes that route into a continuous ``Q``; :math:`|u_{\rm obs}|` takes
+    it only when ``u_obs`` lives in a discontinuous space, which for the
+    usual CG1 observation is never -- the lift is then a no-op and the
+    result is bit-identical to interpolating the nodal speed.  Making the
+    test on the operand rather than on an undocumented caller contract is
+    what keeps the guarantee unconditional: a DG0 ``u_obs`` against a CG1
+    ``Q`` would otherwise put the last-cell-wins node back, silently, and
+    the module already supports a DG0 ``s``, so mixed-space callers are
+    contemplated.
     """
     grad_s = surface_slope(s)
     tau_d = rho_I * g * H * sqrt(inner(grad_s, grad_s) + Constant(1e-12))
     speed = max_value(sqrt(inner(u_obs, u_obs)), Constant(u_floor))
+    if Q.ufl_element().sobolev_space <= ufl.H1:
+        DG = FunctionSpace(Q.mesh(), "DG", 0)
+        tau_d = cg1_lift(Function(DG).interpolate(tau_d))
+        if not _is_continuous(u_obs):
+            speed = cg1_lift(Function(DG).interpolate(speed))
     return Function(Q, name=name).interpolate(tau_d / speed ** (1.0 / m_slide))
 
 
@@ -241,19 +309,6 @@ def friction_residual(tau, sigma, u, tau_b, u_min=U_MIN):
     """
     u_reg = sqrt(inner(u, u) + Constant(u_min) ** 2)
     return inner(tau + tau_b * u / u_reg, sigma) * dx
-
-
-def ocean_drag(u, H, drag, h_ocean=10.0, u_min=U_MIN):
-    r"""Linear drag confined to ice-free cells, ramping to zero at ``h_ocean``.
-
-    Frictionless floor cells (``C_w0`` and ``N`` both ~0) have no velocity
-    coercivity, and a thick front adjacent to them pumps momentum through
-    the surface-jump facet term into the degenerate side.  This bounds
-    that without touching real ice.  Exactly zero for ``H >= h_ocean``.
-    """
-    u_reg = sqrt(inner(u, u) + Constant(u_min) ** 2)
-    ramp = max_value(Constant(0.0), Constant(1.0) - H / Constant(h_ocean))
-    return Constant(drag) * ramp * u_reg
 
 
 def speed_limiter(u, u_lim, k_lim=1e-3, u_min=U_MIN):

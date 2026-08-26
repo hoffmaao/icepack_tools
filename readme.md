@@ -62,25 +62,48 @@ fixed at its target in every case:
 
 | diffusion (n=1) | n | result | max speed |
 |---|---|---|---|
-| off | ramped 1 -> n | converged, 42 its | 1132.5 m/yr |
+| off | ramped 1 -> n | converged, 42 its | 1147.3 m/yr |
 | off | **direct** | **diverges** | -- |
-| 1e-3 | ramped 1 -> n | converged, 41 its | 1136.1 m/yr |
-| 1e-3 | **direct** | **converged, 46 its** | 1136.1 m/yr |
+| 1e-3 | ramped 1 -> n | converged, 41 its | 1151.0 m/yr |
+| 1e-3 | **direct** | **converged, 47 its** | 1151.0 m/yr |
 
 So: the residual friction closure removes the `m`-continuation, and
 diffusion creep removes the `n`-continuation.  Together **the whole
 continuation apparatus disappears** -- one cold solve replaces a staged
-ramp.  The ramped and direct paths agree to 7.9e-12, so the direct solve
+ramp.  The ramped and direct paths agree to 1.98e-16, so the direct solve
 is not converging somewhere else.
 
 The test also checks the headline property directly: on the 280 cells
-lying 100 m or more below flotation, `|tau_b|` is 5.3e-15 kPa, i.e.
-1.8e-17 of the grounded maximum -- machine zero, against the ~1 % of
+lying 100 m or more below flotation, `|tau_b|` is below 1e-12 kPa, i.e.
+below 1e-14 of the grounded maximum -- machine zero, against the ~1 % of
 grounded drag that a `phi_eff` floor of 0.01 leaves on every shelf node.
 Floating cells are picked out by height above flotation rather than by
 `N <= 0`: `N` is the cancelling difference `p_I - p_W`, so on a shelf it
 is a roundoff residue rather than 0, and an `N <= 0` mask would drop
 exactly the cells a law gated on `N > 0` still acts on.
+
+Afloat, `tau_b` is *analytically* zero rather than small: `N` is clamped
+to `max(p_I - p_W, 0)`, so `tau_cap = max(c0 N, eps_tauc)` is exactly 0
+at the default `eps_tauc = 0`, and the blend `tau_W tau_cap /
+max(tau_W + tau_cap, 1e-15)` is then 0 whatever `tau_W` is -- the point
+of `N` entering as a *factor* rather than through a conditional, since
+there is no threshold to sit on the wrong side of.  What the solve
+returns is therefore roundoff, not residual physics: `tau` is a
+solved-for unknown, so the factorisation reaches that zero only to the
+precision of the system it sits in.  Those digits belong to the linear
+solve and move whenever anything upstream perturbs it -- this branch's
+anchor change among them -- so machine-zero drag is quoted here and in
+the friction-law table below as a *bound* rather than as a measured
+value.  The bound is the property actually being asserted, and it holds
+for any anchor for the reason above: `N` enters `tau_b` as a
+multiplicative factor and is exactly zero afloat.  Every bound quoted is
+the one its test asserts (`SHELF_DRAG_MAX_KPA` and `SHELF_DRAG_MAX_REL`
+in `multilayer_rc_test.py` and `dual_forms_test.py`), so a drift that
+falsifies this readme fails a test rather than going unnoticed; each
+carries two to five decades of headroom over what the solves currently
+print, sized to how far that law's residue has actually been seen to
+move.  The cell count is not a bound but an exact number -- it is pure
+geometry, how many cells lie 100 m or more below flotation.
 
 ## What this buys
 
@@ -95,9 +118,14 @@ exactly the cells a law gated on `N > 0` still acts on.
   is identically zero afloat: an optimiser physically cannot place basal
   friction on a shelf.
 - **A balanced starting control.**  The anchor `C_w0 = tau_d / |u_obs|^(1/m)`
-  makes the Weertman branch return exactly `tau_d` at `u = u_obs, theta = 0`,
-  so `theta` is an O(1) log-adjustment rather than carrying the whole
-  friction magnitude.
+  makes the Weertman branch return the *lifted* `tau_d` at
+  `u = u_obs, theta = 0` -- the patch-averaged driving stress rather than
+  the pointwise one, since `grad(s)` is discontinuous and cannot be
+  interpolated into a continuous space without the answer following the
+  mesh partition.  The balance is therefore approximate, measurably so at
+  the domain boundary where the lift's stencil is one-sided, but `theta`
+  is still an O(1) log-adjustment rather than carrying the whole friction
+  magnitude.
 - **Positive-definite membrane block as `h -> 0`.**  The composite flow law
   adds a small linear term at a *constant* reference thickness, so calving
   fronts, nunataks and ocean buffers stay well posed.
@@ -177,18 +205,28 @@ not.  `regularized_coulomb` needs no such gate: `N` enters as a factor,
 so the residue passes straight through instead of being amplified.
 
 Measured on the test slab (`L = 1`, `n = 3`, cold start, `theta = 0`),
-maximum `|tau_b|` on cells 100 m or more below flotation:
+maximum `|tau_b|` on cells 100 m or more below flotation.  The two capped
+laws are bounds rather than values, for the reason given above: what the
+solve prints there is its own roundoff on an analytically zero quantity.
 
 | law | its | max speed | shelf drag |
 |---|---|---|---|
-| `regularized_coulomb` | 22 | 1943.3 m/yr | 7.0e-16 kPa (2.2e-18 of grounded max) |
-| `budd` | 22 | 731.6 m/yr | 2.3e-26 kPa (6.9e-29) |
-| `weertman` | 23 | 356.9 m/yr | 5.7e+00 kPa (1.7e-02) |
+| `regularized_coulomb` | 23 | 2081.3 m/yr | < 1e-13 kPa (< 1e-14 of grounded max) |
+| `budd` | 23 | 868.6 m/yr | < 1e-15 kPa (< 1e-18) |
+| `weertman` | 22 | 429.2 m/yr | 6.2e+00 kPa (1.9e-02) |
+
+`budd` keeps its own, much tighter bound because it gates on the grounded
+indicator `He` as well as capping on `N`, so what is left afloat is the
+`tau` solve's own roundoff rather than the cap's -- a single bound loose
+enough to cover both laws would stop testing that.  Its residue is also
+the more volatile: it moved six decades under this branch's anchor
+change, where `regularized_coulomb`'s moved a factor of 1.3, which is why
+it carries the wider margin over what it prints.
 
 Weertman's nonzero shelf drag is correct, not a bug -- it has no
-effective-pressure cap.  The test asserts it *is* nonzero, so that the
-machine-zero assertions on the other two are known to be discriminating
-rather than vacuously true.
+effective-pressure cap.  The test asserts it *is* nonzero (above 1e-6 of
+the grounded maximum), so that the machine-zero assertions on the other
+two are known to be discriminating rather than vacuously true.
 
 ## Modules
 
@@ -198,9 +236,10 @@ rather than vacuously true.
 | `spaces` | `dual_function_space` (L >= 1), `layer_thicknesses`, `split_layers` |
 | `geometry` | `cg1_lift`, `surface_slope` (CG1 *or* DG0 safe) |
 | `grounding` | `height_above_flotation`, `grounded_mask`, `effective_pressure` |
-| `friction` | `weertman_anchor`, `basal_stress` (3 laws), `friction_residual`, floor-cell drags |
+| `friction` | `weertman_anchor` (partition-independent), `basal_stress` (3 laws), `friction_residual`, `speed_limiter` |
 | `viscosity` | `membrane_residual`, `interlayer_residual` (composite, regularised) |
 | `momentum` | `momentum_residual`, `calving_terminus`, `dual_residual` (L >= 1) |
+| `parallel` | `gather`/`scatter`, `gather_vector`, `gather_speed`, `stats`, `format_stats` |
 
 ## Calving fronts
 
