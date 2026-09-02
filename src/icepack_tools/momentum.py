@@ -29,7 +29,7 @@ from firedrake import (
 )
 from icepack2 import model as _icepack2_model
 
-from .constants import ice_density, gravity
+from .constants import ice_density, water_density, gravity
 from .friction import basal_stress, friction_residual
 from .viscosity import (membrane_residual, interlayer_residual,
                         H_JUMP_FLOOR)
@@ -92,7 +92,8 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
                   c_w0_floor=0.0, h_visc_floor=0.0, alpha_gl=0.0,
                   u_lim=0.0, k_lim=1e-3, gl_width=10.0,
                   h_jump_floor=H_JUMP_FLOOR,
-                  outflow_ids=None):
+                  outflow_ids=None,
+                  rho_I=ice_density, rho_W=water_density, g=gravity):
     r"""Full dual residual for an ``L``-layer column, ``L >= 1``.
 
     **``L = 1`` is the ordinary single-layer icepack2 dual model** -- the
@@ -165,6 +166,18 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
         ``nhat_cap`` apply to ``budd`` only; ``c0`` and ``eps_tauc`` to
         ``regularized_coulomb`` only.
 
+    rho_I, rho_W, g : float
+        Ice density, seawater density and gravity in icepack2 units
+        (MPa, m, yr), defaulting to icepack2's constants.  They enter the
+        driving stress, the grounded indicator and the effective pressure.
+        A consumer whose protocol fixes other values -- MISMIP+ and
+        CalvingMIP both prescribe 1028 kg/m^3 seawater against icepack2's
+        1024 -- passes them here so the friction cap and the grounding
+        indicator vanish at the same flotation thickness as its own
+        hydrostatic surface, instead of a few metres away from it.  The
+        terminus back-pressure (``outflow_ids``) still uses icepack2's
+        constants, as it comes straight from ``icepack2.model``.
+
     Notes
     -----
     Every block is closed in residual form, so the Jacobian is
@@ -201,7 +214,7 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
             f"singular."
         )
     tests = split(TestFunction(z.function_space()))
-    He = grounded_mask(H, b, gl_width=gl_width)
+    He = grounded_mask(H, b, gl_width=gl_width, rho_I=rho_I, rho_W=rho_W)
 
     F = None
     for l in range(num_layers):
@@ -221,7 +234,7 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
             tau=S_l if l == 0 else None,
             stress_above=fields[3 * (l + 1) + 2] if l < num_layers - 1 else None,
             stress_below=S_l if l > 0 else None,
-            h_floor=h_visc_floor,
+            h_floor=h_visc_floor, rho_I=rho_I, g=g,
         )
         if outflow_ids:
             term += calving_terminus(u_l, v_l, H, s, outflow_ids,
@@ -234,7 +247,7 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
                          u_min=u_min, eps_tauc=eps_tauc, He=He,
                          gl_width=gl_width, c_w0_floor=c_w0_floor,
                          N_ref=N_ref, nhat_floor=nhat_floor,
-                         nhat_cap=nhat_cap)
+                         nhat_cap=nhat_cap, rho_I=rho_I, rho_W=rho_W, g=g)
     if u_lim > 0.0:
         from .friction import speed_limiter
         tau_b = tau_b + speed_limiter(u_b, u_lim, k_lim, u_min)

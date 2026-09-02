@@ -50,7 +50,7 @@ from firedrake import (
     max_value, min_value, sqrt,
 )
 
-from .constants import ice_density, gravity
+from .constants import ice_density, water_density, gravity
 from .geometry import cg1_lift, surface_slope
 from .grounding import effective_pressure, grounded_mask, GL_WIDTH
 
@@ -123,7 +123,8 @@ LAWS = ("regularized_coulomb", "budd", "weertman")
 
 def basal_stress(u, C_w0, theta, H, s, b, m_slide, *, law="regularized_coulomb",
                  c0=C0, u_min=U_MIN, eps_tauc=0.0, He=None, gl_width=GL_WIDTH,
-                 c_w0_floor=0.0, N_ref=None, nhat_floor=0.0, nhat_cap=3.0):
+                 c_w0_floor=0.0, N_ref=None, nhat_floor=0.0, nhat_cap=3.0,
+                 rho_I=ice_density, rho_W=water_density, g=gravity):
     r"""Basal stress magnitude :math:`\tau_b` (scalar, MPa) for one of :data:`LAWS`.
 
     All three share the Weertman branch
@@ -204,6 +205,13 @@ def basal_stress(u, C_w0, theta, H, s, b, m_slide, *, law="regularized_coulomb",
         anything -- so that combination is rejected outright.
     nhat_cap : float
         Budd only.  Upper bound on ``N_hat`` (Joughin's ``reduceNearGLBeta``).
+    rho_I, rho_W, g : float
+        Densities and gravity in icepack2 units, defaulting to icepack2's
+        constants.  They enter the grounded indicator (when ``He`` is not
+        supplied), the effective pressure and the PISM floor's overburden,
+        so a consumer whose protocol fixes a different seawater density
+        (MISMIP+ and CalvingMIP use 1028 kg/m^3) gets a friction cap that
+        vanishes at *its* flotation criterion rather than icepack2's.
     """
     if law not in LAWS:
         raise ValueError(f"unknown friction law {law!r}; expected one of {LAWS}")
@@ -218,8 +226,8 @@ def basal_stress(u, C_w0, theta, H, s, b, m_slide, *, law="regularized_coulomb",
             "inversion-geometry effective pressure) or set nhat_floor=0."
         )
     if He is None:
-        He = grounded_mask(H, b, gl_width=gl_width)
-    N = effective_pressure(H, s)
+        He = grounded_mask(H, b, gl_width=gl_width, rho_I=rho_I, rho_W=rho_W)
+    N = effective_pressure(H, s, rho_I=rho_I, rho_W=rho_W, g=g)
 
     u_reg = sqrt(inner(u, u) + Constant(u_min) ** 2)
     C_eff = max_value(C_w0, Constant(c_w0_floor)) if c_w0_floor else C_w0
@@ -239,7 +247,7 @@ def basal_stress(u, C_w0, theta, H, s, b, m_slide, *, law="regularized_coulomb",
         Nr = max_value(N if N_ref is None else N_ref, Constant(1e-6))
         N_hat = min_value(N / Nr, Constant(nhat_cap))
         if nhat_floor > 0.0:
-            p_I = ice_density * gravity * max_value(H, Constant(1.0))
+            p_I = rho_I * g * max_value(H, Constant(1.0))
             N_hat = min_value(max_value(N_hat, Constant(nhat_floor) * p_I / Nr),
                               Constant(nhat_cap))
         # He, not the sign of N, is what enforces the zero afloat.  N is

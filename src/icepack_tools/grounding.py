@@ -38,14 +38,21 @@ def smooth_heaviside(haf, kH=1.0):
     return Constant(0.5) + Constant(0.5) * fd.tanh(Constant(kH) * haf)
 
 
-def grounded_mask(H, b, gl_width=GL_WIDTH):
+def grounded_mask(H, b, gl_width=GL_WIDTH, rho_I=ice_density,
+                  rho_W=water_density):
     r"""Smooth grounded indicator ``He`` in [0, 1] (1 grounded, 0 floating).
 
     Gating the friction control by ``He`` makes the adjoint gradient
     ``dJ/dtheta`` vanish on floating ice, so an optimiser physically cannot
     place basal friction on a shelf.
+
+    ``rho_I`` and ``rho_W`` default to icepack2's constants (917 and 1024
+    kg/m^3 in MPa-m-yr units); pass the same values the caller uses for its
+    own flotation surface, or the indicator and the surface disagree about
+    where flotation is (MISMIP+ and CalvingMIP prescribe 1028).
     """
-    return smooth_heaviside(height_above_flotation(H, b), kH=1.0 / gl_width)
+    haf = height_above_flotation(H, b, rho_I=rho_I, rho_W=rho_W)
+    return smooth_heaviside(haf, kH=1.0 / gl_width)
 
 
 def effective_pressure(H, s, rho_I=ice_density, rho_W=water_density,
