@@ -45,8 +45,12 @@ negative in ice) to ``desired_element_size`` and three things change:
   condition and the advected front need the buffered ocean mesh. It is
   coarsened to ``size`` instead, which is the same saving with the front
   kinematics intact;
-* after the remesh the level set is transferred as a field
-  (``cross_mesh_transfer``) and then reinitialised ONCE on the new cells by
+* after the remesh the level set is transferred THROUGH ITS P1 LIFT
+  (``cross_mesh_transfer(cg1_lift(phi), ...)``, the interpolant the level
+  set's own anchoring reads; a DG0 cell constant sampled at a new centroid
+  misplaces the zero contour by up to half an old cell: +463 m against
+  +102 m as transferred on 15-48 km cells, +797 m against +38 m after the
+  reinitialisation below) and then reinitialised ONCE on the new cells by
   the consumer's ``LevelSet`` (or re-anchored analytically when the incoming
   front is a known circle, as the CalvingMIP model does). Once, because the
   transferred field is ragged (median ``|grad phi|`` 1.6, a tenth of the
@@ -617,13 +621,15 @@ def remesh_global(mesh, h_des, cfg, out_msh, build_geometry, *, reference_msh=No
 # Step 3: transfer helpers (MapFbetweenMeshes and the DG0 additions)
 # ---------------------------------------------------------------------------
 
-def cross_mesh_transfer(f_old, mesh_new, how="interpolate", default=0.0):
-    r"""Move ``f_old`` onto ``mesh_new`` in a space of the same element.
-    ``interpolate`` is Úa's point evaluation (``default`` outside the old
-    mesh); ``project`` is the conservative supermesh projection, which
-    Firedrake refuses between independently partitioned meshes in parallel,
-    so it needs one rank."""
-    V_new = FunctionSpace(mesh_new, f_old.function_space().ufl_element())
+def cross_mesh_transfer(f_old, mesh_new, how="interpolate", default=0.0, element=None):
+    r"""Move ``f_old`` onto ``mesh_new`` in a space of the same element, or
+    of ``element`` (a UFL element) when the target differs: a level set is
+    carried as its P1 lift and lands in DG0, ``element=phi.function_space()
+    .ufl_element()``. ``interpolate`` is Úa's point evaluation (``default``
+    outside the old mesh); ``project`` is the conservative supermesh
+    projection, which Firedrake refuses between independently partitioned
+    meshes in parallel, so it needs one rank."""
+    V_new = FunctionSpace(mesh_new, element or f_old.function_space().ufl_element())
     if how == "project":
         if mesh_new.comm.size > 1:
             raise RuntimeError("transfer='project' needs the adapt step on ONE rank (mpiexec -n 1)")

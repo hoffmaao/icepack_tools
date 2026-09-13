@@ -260,7 +260,10 @@ def test_level_set_survives_a_remesh():
         n = remesh_global(mesh, h_des, cfg, out, build, log=quiet)
         assert n > 100
         m2 = Mesh(out)
-    phi2 = cross_mesh_transfer(phi, m2, "interpolate", default=radius)
+    from icepack_tools.geometry import cg1_lift
+    # the P1 lift, landing in DG0 (see the module docstring)
+    phi2 = cross_mesh_transfer(cg1_lift(phi), m2, "interpolate", default=radius,
+                               element=phi.function_space().ufl_element())
     H2 = cross_mesh_transfer(H, m2, "interpolate", default=0.0)
     H2.dat.data[phi2.dat.data_ro > 0.0] = 0.0          # the level set decides
     front = LevelSet(m2, H2, law="none", h_min=1.0, phi_init=phi2, anchor="advect")
@@ -276,13 +279,16 @@ def test_level_set_survives_a_remesh():
         # phi = 0 where r = R, so r - phi is R across the band
         return np.median(mag), np.percentile(mag, 10), np.median((r2 - p)[band]) - R
 
-    mag0, p10_0, err0 = grad_and_front()      # as transferred: ragged
+    mag0, p10_0, err0 = grad_and_front()      # as transferred
     front.reinitialise()                       # once
     mag1, p10_1, err1 = grad_and_front()
-    assert abs(err1) < 0.3 * cfg.mesh_size_min, err1          # front kept
-    assert abs(mag1 - 1.0) < abs(mag0 - 1.0) and p10_1 > p10_0  # distance restored
-    assert abs(mag1 - 1.0) < 0.15, mag1
-    # Measured on this disc: transferred median 1.61 (p10 0.00), one pass
-    # 1.12 with the front moved 111 m, but a second pass moves it 1.0 km and
-    # a fourth 1.4 km. Transfer, then reinitialise ONCE; the level set's own
-    # cadence takes over from there.
+    # Measured on this disc. Carrying the DG0 cell values: median |grad phi|
+    # 1.61 with a tenth of the band at 0, one reinitialisation 1.12 with the
+    # front moved 111 m, a second pass 1.0 km, a fourth 1.4 km. Carrying the
+    # P1 lift: 1.005 (p10 0.985) as transferred, 1.0003 after one pass, the
+    # front kept to a few tens of metres. Transfer the lift, reinitialise
+    # once; the level set's own cadence takes over from there.
+    assert abs(err0) < 0.1 * cfg.mesh_size_min, err0          # front kept by the transfer itself
+    assert abs(err1) < 0.1 * cfg.mesh_size_min, err1          # ... and by the one reinitialisation
+    assert abs(mag0 - 1.0) < 0.05 and p10_0 > 0.9, (mag0, p10_0)   # already a distance function
+    assert abs(mag1 - 1.0) < 0.05 and p10_1 > 0.9, (mag1, p10_1)
