@@ -292,3 +292,24 @@ def test_level_set_survives_a_remesh():
     assert abs(err1) < 0.1 * cfg.mesh_size_min, err1          # ... and by the one reinitialisation
     assert abs(mag0 - 1.0) < 0.05 and p10_0 > 0.9, (mag0, p10_0)   # already a distance function
     assert abs(mag1 - 1.0) < 0.05 and p10_1 > 0.9, (mag1, p10_1)
+
+
+def test_remesh_failure_is_collective():
+    r"""A geometry builder that raises on rank 0 must raise the same error on
+    EVERY rank, not leave the others waiting in a barrier (run this file
+    under ``mpiexec -n 3`` to exercise more than one rank)."""
+    import gmsh  # noqa: F401
+    mesh = _disc()
+    Q, H, b, phi = _front(mesh, 70e3)
+    cfg = AdaptMeshConfig(mesh_size=10e3, mesh_size_min=3e3, mesh_size_max=15e3)
+    h_des, _ = desired_element_size(mesh, cfg, H, b, phi=phi, log=lambda *a: None)
+
+    def broken():
+        raise KeyError("no geometry today")
+
+    with tempfile.TemporaryDirectory() as d:
+        out = os.path.join(d, "never.msh")
+        with pytest.raises(RuntimeError, match="remesh failed on rank 0: KeyError"):
+            remesh_global(mesh, h_des, cfg, out, broken, log=lambda *a: None)
+    # every rank got here: a collective op still works afterwards
+    assert COMM_WORLD.allreduce(1) == COMM_WORLD.size

@@ -551,17 +551,40 @@ def remesh_global(mesh, h_des, cfg, out_msh, build_geometry, *, reference_msh=No
     ``MeshSizeMin`` up to four times. If ``reference_msh`` is given the new
     mesh must expose the same physical groups (or the boundary conditions land
     on the wrong facets), and ``sidecar_in`` is then copied to ``sidecar_out``.
-    Returns the element count.
+    Returns the element count.  Failure is collective: whatever goes wrong on
+    rank 0 (gmsh raises a bare ``Exception``) is raised as the same
+    ``RuntimeError`` on every rank, so a caller's collective clean-up after
+    a failed remesh cannot deadlock.
     """
     comm = mesh.comm
     X, v = _gather_nodal_field(mesh, h_des)
-    n_ele = None
+    n_ele, failure = None, None
     if comm.rank == 0:
-        import gmsh
-        from scipy.spatial import Delaunay
-        tri = Delaunay(X).simplices
-        sizes = v.copy()
-        size_min = cfg.mesh_size_min
+        try:
+            n_ele = _remesh_rank0(X, v, cfg, out_msh, build_geometry, reference_msh,
+                                  sidecar_in, sidecar_out, log)
+        except Exception as e:                      # gmsh raises bare Exception
+            failure = f"{type(e).__name__}: {e}"
+    # Collective by construction: a failure on rank 0 is broadcast before any
+    # rank waits, and every rank raises the same error.  Otherwise the other
+    # ranks sit in a barrier for ever while rank 0 unwinds, and the caller's
+    # collective clean-up (closing a writer, saving a checkpoint) deadlocks.
+    failure = comm.bcast(failure, root=0)
+    if failure is not None:
+        raise RuntimeError(f"remesh failed on rank 0: {failure}")
+    return comm.bcast(n_ele, root=0)
+
+
+def _remesh_rank0(X, v, cfg, out_msh, build_geometry, reference_msh, sidecar_in, sidecar_out, log):
+    r"""The rank-0 body of :func:`remesh_global`: gmsh, the element-count
+    control, the physical-group check and the sidecar copy.  Returns the
+    element count; any exception becomes a collective failure in the caller."""
+    import gmsh
+    from scipy.spatial import Delaunay
+    tri = Delaunay(X).simplices
+    sizes = v.copy()
+    size_min = cfg.mesh_size_min
+    if True:
 
         def generate(sizes):
             gmsh.initialize()
@@ -613,8 +636,7 @@ def remesh_global(mesh, h_des, cfg, out_msh, build_geometry, *, reference_msh=No
                 side = json.load(f)
             with open(sidecar_out, "w") as f:
                 json.dump(side, f)
-    comm.barrier()
-    return comm.bcast(n_ele, root=0)
+        return n_ele
 
 
 # ---------------------------------------------------------------------------
