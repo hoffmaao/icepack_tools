@@ -29,6 +29,34 @@ The scheme, with Úa's names:
    FE shape functions, nearest outside); the geometry route ``bh-FROM-sBS``
    (Úa's default: move the surface, derive the thickness) or ``bs-FROM-hBS``.
 
+**With a level set** (the CalvingMIP front, ``icepack_tools.levelset``, and
+the plan of record in ``docs/levelset_primary_front_plan.md``) the front is
+state, not the edge of the thickness. Pass ``phi`` (DG0 signed distance,
+negative in ice) to ``desired_element_size`` and three things change:
+
+* the ``CFrange`` bands measure ``|phi|`` itself, which is the distance to
+  the front for a signed-distance level set, instead of locating ice/no-ice
+  facets from ``H`` and querying a tree of their midpoints -- exact, cheap,
+  and it moves with the advected front rather than with the cells the ice
+  happens to fill;
+* the water beyond a strip (``water=(strip, size)``) is the region Úa would
+  *deactivate* (``LevelSetMethodAutomaticallyDeactivateElements`` with
+  ``LevelSetMethodStripWidth``). We do not remove it: the eikonal boundary
+  condition and the advected front need the buffered ocean mesh. It is
+  coarsened to ``size`` instead, which is the same saving with the front
+  kinematics intact;
+* after the remesh the level set is transferred as a field
+  (``cross_mesh_transfer``) and then reinitialised ONCE on the new cells by
+  the consumer's ``LevelSet`` (or re-anchored analytically when the incoming
+  front is a known circle, as the CalvingMIP model does). Once, because the
+  transferred field is ragged (median ``|grad phi|`` 1.6, a tenth of the
+  front band at 0) and a single pass restores it (1.12) while moving the
+  front 111 m on a 3 km mesh, but each further pass moves the front on the
+  order of a kilometre (``test_level_set_survives_a_remesh``). The level
+  set's own reinitialisation cadence takes over afterwards. ``preserve_front``
+  is for a thickness-defined front whose ice reaches the mesh boundary; with
+  a level set the mesh boundary is open ocean and it must not be applied.
+
 Three things a DG0 model needs that Úa (nodal) never did, each measured on
 the ISMIP7 32 km control: the DG0 front thickness smears under any
 interpolation (``preserve_front``); a frozen apparent-mass-balance reference
@@ -318,6 +346,17 @@ def calving_front_points(mesh, H, cfg):
     return gather_points(mesh.comm, xm[sel], ym[sel])
 
 
+def nodal_distance_to_front(phi, Qc):
+    r"""Distance from every CG1 node to the calving front, from the level
+    set: ``|phi|`` lifted to the nodes. For a signed-distance ``phi`` this
+    IS the distance, on both sides of the front, with no contour to extract.
+    Between reinitialisations ``|grad phi|`` drifts from 1 by at most the
+    level set's own tolerance, which is far inside any band width."""
+    d = Function(Qc)
+    d.dat.data[:] = np.abs(cg1_lift(phi).dat.data_ro)
+    return d
+
+
 def nodal_distance_to(mesh, Qc, points):
     r"""Distance from every CG1 node to the nearest of ``points``."""
     from scipy.spatial import cKDTree
@@ -331,11 +370,19 @@ def nodal_distance_to(mesh, Qc, points):
 # Step 1: desired element size
 # ---------------------------------------------------------------------------
 
-def desired_element_size(mesh, cfg, H, b, u=None, dhdt=None, weight=None, log=PETSc.Sys.Print):
+def desired_element_size(mesh, cfg, H, b, u=None, dhdt=None, weight=None, phi=None,
+                         water=None, log=PETSc.Sys.Print):
     r"""Úa ``NewDesiredEleSizesAndElementsToRefineOrCoarsen2`` for the
     ``explicit:global`` method: the CG1 ``EleSizeDesired`` on ``mesh`` and a
     dict of diagnostics. ``weight`` (CG1, 0..1) multiplies every relative
-    criterion's error proxy, e.g. an observation mask."""
+    criterion's error proxy, e.g. an observation mask.
+
+    ``phi`` (DG0 signed distance, negative in ice) makes the level set the
+    authority on where the front is: the ``CFrange`` bands are measured as
+    ``|phi|`` and ``water=(strip, size)`` coarsens every node with
+    ``phi > strip`` to at least ``size`` (Úa would deactivate those
+    elements; see the module docstring). Without ``phi`` the front is the
+    ice/no-ice edge of ``H``, as in Úa."""
     Qc = FunctionSpace(mesh, "CG", 1)
     comm = mesh.comm
     n_nodes = Qc.dof_dset.size
@@ -419,12 +466,29 @@ def desired_element_size(mesh, cfg, H, b, u=None, dhdt=None, weight=None, log=PE
             h_des.dat.data[sel] = np.minimum(h_des.dat.data_ro[sel], max(size, cfg.mesh_size_min))
         diag["n_gl_points"] = int(gl.shape[0])
     if cfg.cf_range:
-        cf = calving_front_points(mesh, H, cfg)
-        d_cf = nodal_distance_to(mesh, Qc, cf)
+        if phi is not None:
+            d_cf = nodal_distance_to_front(phi, Qc)
+            diag["front_from"] = "level set"
+        else:
+            cf = calving_front_points(mesh, H, cfg)
+            d_cf = nodal_distance_to(mesh, Qc, cf)
+            diag["n_cf_points"] = int(cf.shape[0])
+            diag["front_from"] = "thickness"
         for dist, size in cfg.cf_range:
             sel = d_cf.dat.data_ro < dist
             h_des.dat.data[sel] = np.minimum(h_des.dat.data_ro[sel], max(size, cfg.mesh_size_min))
-        diag["n_cf_points"] = int(cf.shape[0])
+    if water is not None:
+        if phi is None:
+            raise ValueError("water=(strip, size) needs the level set phi")
+        strip, size = water
+        if cfg.cf_range and strip < max(d for d, _ in cfg.cf_range):
+            raise ValueError(f"water strip {strip:g} m lies inside the widest CFrange band "
+                             f"{max(d for d, _ in cfg.cf_range):g} m; the front band would be coarsened")
+        # signed: only the water side, and only to coarsen
+        phi_n = cg1_lift(phi).dat.data_ro
+        sel = phi_n > strip
+        h_des.dat.data[sel] = np.maximum(h_des.dat.data_ro[sel], min(size, cfg.mesh_size_max))
+        diag["n_water_nodes"] = int(comm.allreduce(int(sel.sum())))
 
     # Úa's user hook (DefineDesiredEleSize) runs after the bands; PIG-TWG's is
     # two rules: floating ice and low ground get a fixed size.
@@ -444,7 +508,9 @@ def desired_element_size(mesh, cfg, H, b, u=None, dhdt=None, weight=None, log=PE
     diag.update(size_min=lo, size_max=hi)
     log(f"  adapt: desired element size in [{lo:.0f}, {hi:.0f}] m"
         + (f", GL points {diag['n_gl_points']}" if "n_gl_points" in diag else "")
-        + (f", front points {diag['n_cf_points']}" if "n_cf_points" in diag else ""))
+        + (f", front from the {diag['front_from']}" if "front_from" in diag else "")
+        + (f", front points {diag['n_cf_points']}" if "n_cf_points" in diag else "")
+        + (f", water nodes coarsened {diag['n_water_nodes']}" if "n_water_nodes" in diag else ""))
     return h_des, diag
 
 
@@ -578,7 +644,12 @@ def boundary_cells(mesh, Q0):
 def preserve_front(mesh_old, H_old, mesh_new, H_new):
     r"""Overwrite every new boundary cell's value with that of the nearest old
     boundary cell (by centroid, globally): the DG0 analogue of Úa's boundary
-    nodes interpolating from the old boundary edge alone. Returns the count."""
+    nodes interpolating from the old boundary edge alone. Returns the count.
+
+    For a thickness-defined front that reaches the mesh boundary only. With
+    a level set on a buffered mesh the boundary is open ocean and the front
+    is interior; there the level set decides which cells hold ice after a
+    transfer, and this must not be called."""
     from scipy.spatial import cKDTree
     comm = mesh_new.comm
     oc, oxc, oyc = boundary_cells(mesh_old, H_old.function_space())

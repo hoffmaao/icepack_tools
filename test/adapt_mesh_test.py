@@ -156,3 +156,133 @@ def test_surface_route_and_reference_pressure_ratio():
     g = N2.dat.data_ro > 0
     assert np.allclose(N2.dat.data_ro[g] / N_ref2.dat.data_ro[g], 0.7, rtol=1e-6)
     assert np.all(N_ref2.dat.data_ro[~g] == 0.0)
+
+
+# ---------------------------------------------------------------------------
+# The level set as the authority on where the front is
+# ---------------------------------------------------------------------------
+def _disc(level=3, radius=100e3):
+    from firedrake import UnitDiskMesh
+    m = UnitDiskMesh(level)
+    m.coordinates.dat.data[:] *= radius
+    return m
+
+
+def _front(mesh, R):
+    r"""Ice inside ``r < R`` on a buffered disc: ``H`` and the signed distance."""
+    Q = FunctionSpace(mesh, "DG", 0)
+    x = SpatialCoordinate(mesh)
+    r = (x[0] ** 2 + x[1] ** 2) ** 0.5
+    H = Function(Q).interpolate(conditional(r < R, 300.0, 0.0))
+    phi = Function(Q).interpolate(r - Constant(R))
+    b = Function(Q).interpolate(Constant(-1000.0))
+    return Q, H, b, phi
+
+
+def test_front_bands_from_the_level_set():
+    r"""With ``phi`` given, the CFrange bands are ``|phi| < d`` exactly, and
+    agree with the thickness-located front to within a cell."""
+    from icepack_tools.geometry import cg1_lift
+    mesh = _disc()
+    R = 70e3
+    Q, H, b, phi = _front(mesh, R)
+    cfg = AdaptMeshConfig(mesh_size=20e3, mesh_size_min=2e3, mesh_size_max=20e3,
+                          cf_range=[(15e3, 4e3), (6e3, 2e3)])
+    quiet = lambda *a: None  # noqa: E731
+    h_ls, d_ls = desired_element_size(mesh, cfg, H, b, phi=phi, log=quiet)
+    h_th, d_th = desired_element_size(mesh, cfg, H, b, log=quiet)
+    assert d_ls["front_from"] == "level set" and d_th["front_from"] == "thickness"
+    dist = np.abs(cg1_lift(phi).dat.data_ro)
+    assert np.all(h_ls.dat.data_ro[dist < 6e3] == pytest.approx(2e3))
+    assert np.all(h_ls.dat.data_ro[(dist >= 6e3) & (dist < 15e3)] == pytest.approx(4e3))
+    assert np.all(h_ls.dat.data_ro[dist > 15e3] > 4e3)
+    # the two conventions disagree only where the thickness edge sits up
+    # to a cell off the exact contour: every differing node lies within one
+    # cell diameter of a band edge, and nowhere else
+    from icepack_tools.adapt_mesh import current_element_size_nodal
+    Qc = h_ls.function_space()
+    cell = current_element_size_nodal(mesh, Qc).dat.data_ro
+    differ = ~np.isclose(h_ls.dat.data_ro, h_th.dat.data_ro)
+    assert differ.any()
+    to_edge = np.minimum(np.abs(dist - 6e3), np.abs(dist - 15e3))
+    assert np.all(to_edge[differ] < 1.5 * cell[differ]), \
+        (to_edge[differ] / cell[differ]).max()
+
+
+def test_water_strip_coarsens_only_the_water():
+    r"""Nodes with ``phi > strip`` are coarsened to ``size``; the front band
+    and the ice are untouched; a strip inside the widest band is refused."""
+    from icepack_tools.geometry import cg1_lift
+    mesh = _disc()
+    R = 60e3
+    Q, H, b, phi = _front(mesh, R)
+    cfg = AdaptMeshConfig(mesh_size=8e3, mesh_size_min=2e3, mesh_size_max=20e3,
+                          cf_range=[(10e3, 2e3)])
+    quiet = lambda *a: None  # noqa: E731
+    h, diag = desired_element_size(mesh, cfg, H, b, phi=phi, water=(12e3, 20e3), log=quiet)
+    p = cg1_lift(phi).dat.data_ro
+    assert diag["n_water_nodes"] == int((p > 12e3).sum()) > 0
+    assert np.all(h.dat.data_ro[p > 12e3] == pytest.approx(20e3))        # water: coarse
+    assert np.all(h.dat.data_ro[np.abs(p) < 10e3] == pytest.approx(2e3))  # front band: fine
+    assert np.all(h.dat.data_ro[p < -12e3] < 20e3)                        # ice: not coarsened by the rule
+    with pytest.raises(ValueError):
+        desired_element_size(mesh, cfg, H, b, phi=phi, water=(5e3, 20e3), log=quiet)
+    with pytest.raises(ValueError):
+        desired_element_size(mesh, cfg, H, b, water=(12e3, 20e3), log=quiet)
+
+
+def test_level_set_survives_a_remesh():
+    r"""Round trip: size field from the level set, gmsh remesh of the disc,
+    transfer ``phi``, reinitialise on the new cells. The front stays where
+    it was to a fraction of the fine size and the reinitialised field is a
+    unit-gradient distance again."""
+    import gmsh  # noqa: F401
+    from icepack_tools.levelset import LevelSet
+    from firedrake import Mesh
+    mesh = _disc()
+    R, radius = 70e3, 100e3
+    Q, H, b, phi = _front(mesh, R)
+    cfg = AdaptMeshConfig(mesh_size=10e3, mesh_size_min=3e3, mesh_size_max=15e3,
+                          cf_range=[(9e3, 3e3)])
+    quiet = lambda *a: None  # noqa: E731
+    h_des, _ = desired_element_size(mesh, cfg, H, b, phi=phi, water=(15e3, 15e3), log=quiet)
+
+    def build():
+        import gmsh
+        s = gmsh.model.occ.addDisk(0.0, 0.0, 0.0, radius, radius)
+        gmsh.model.occ.synchronize()
+        curves = [c for _, c in gmsh.model.getBoundary([(2, s)], oriented=False)]
+        gmsh.model.addPhysicalGroup(1, curves, name="ocean")
+        gmsh.model.addPhysicalGroup(2, [s], name="domain")
+
+    with tempfile.TemporaryDirectory() as d:
+        out = os.path.join(d, "adapted.msh")
+        n = remesh_global(mesh, h_des, cfg, out, build, log=quiet)
+        assert n > 100
+        m2 = Mesh(out)
+    phi2 = cross_mesh_transfer(phi, m2, "interpolate", default=radius)
+    H2 = cross_mesh_transfer(H, m2, "interpolate", default=0.0)
+    H2.dat.data[phi2.dat.data_ro > 0.0] = 0.0          # the level set decides
+    front = LevelSet(m2, H2, law="none", h_min=1.0, phi_init=phi2, anchor="advect")
+    Q2 = FunctionSpace(m2, "DG", 0)
+    x = SpatialCoordinate(m2)
+    r2 = Function(Q2).interpolate((x[0] ** 2 + x[1] ** 2) ** 0.5).dat.data_ro
+
+    def grad_and_front():
+        p = front.phi.dat.data_ro
+        band = np.abs(p) < 6e3
+        g = front.cell_gradient()
+        mag = np.sqrt((g * g).sum(axis=1))[band]
+        # phi = 0 where r = R, so r - phi is R across the band
+        return np.median(mag), np.percentile(mag, 10), np.median((r2 - p)[band]) - R
+
+    mag0, p10_0, err0 = grad_and_front()      # as transferred: ragged
+    front.reinitialise()                       # once
+    mag1, p10_1, err1 = grad_and_front()
+    assert abs(err1) < 0.3 * cfg.mesh_size_min, err1          # front kept
+    assert abs(mag1 - 1.0) < abs(mag0 - 1.0) and p10_1 > p10_0  # distance restored
+    assert abs(mag1 - 1.0) < 0.15, mag1
+    # Measured on this disc: transferred median 1.61 (p10 0.00), one pass
+    # 1.12 with the front moved 111 m, but a second pass moves it 1.0 km and
+    # a fourth 1.4 km. Transfer, then reinitialise ONCE; the level set's own
+    # cadence takes over from there.
