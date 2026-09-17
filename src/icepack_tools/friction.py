@@ -52,7 +52,7 @@ from firedrake import (
 
 from .constants import ice_density, water_density, gravity
 from .geometry import cg1_lift, surface_slope
-from .grounding import effective_pressure, grounded_mask, GL_WIDTH
+from .grounding import effective_pressure, grounded_mask, height_above_flotation, GL_WIDTH
 
 #: Coulomb-cap coefficient, :math:`\tau_{\rm cap} = c_0 N` (Tsai, Schoof).
 C0 = 0.5
@@ -142,15 +142,15 @@ def basal_stress(u, C_w0, theta, H, s, b, m_slide, *, law="regularized_coulomb",
         With ``N_ref=None`` (the inversion geometry) :math:`\hat N = 1` on
         grounded ice, so the inferred friction is preserved and the
         effective-pressure feedback is a *relative* change as the geometry
-        evolves.  The grounded indicator :math:`H_e` -- not the sign of
-        :math:`N` -- is what holds :math:`\tau_b` at zero afloat.
+        evolves.  Height above flotation -- not the sign of :math:`N` --
+        is what holds :math:`\tau_b` at zero afloat (times :math:`H_e`).
     ``regularized_coulomb``
         :math:`\tau_b = \tau_W\tau_{\rm cap}/(\tau_W + \tau_{\rm cap})`
         with :math:`\tau_{\rm cap} = c_0 N`.
 
     ``budd`` and ``regularized_coulomb`` both give zero drag to machine
-    precision where the ice floats: ``budd`` because :math:`H_e` vanishes
-    there, ``regularized_coulomb`` because :math:`N` enters as a *factor*,
+    precision where the ice floats: ``budd`` because it is gated on
+    HAF > 0, ``regularized_coulomb`` because :math:`N` enters as a *factor*,
     so the roundoff residue of :math:`p_I - p_W` passes straight through
     rather than being amplified.
 
@@ -250,16 +250,20 @@ def basal_stress(u, C_w0, theta, H, s, b, m_slide, *, law="regularized_coulomb",
             p_I = rho_I * g * max_value(H, Constant(1.0))
             N_hat = min_value(max_value(N_hat, Constant(nhat_floor) * p_I / Nr),
                               Constant(nhat_cap))
-        # He, not the sign of N, is what enforces the zero afloat.  N is
-        # the *cancelling* difference p_I - p_W, which on a shelf is a
-        # roundoff residue rather than exactly 0, so gt(N, 0) lets an
+        # Gate on height above flotation, not on the sign of N.  For
+        # grounded ice the two are the same statement (s = b + H gives
+        # N = rho_I g HAF exactly); on a shelf they are not: N is the
+        # *cancelling* difference p_I - p_W, a roundoff residue of either
+        # sign, while HAF stays a real negative number.  gt(N, 0) let an
         # O(1e-16) N through -- and with N_ref equally tiny there, the
-        # floor term nhat_floor * p_I / Nr then amplifies it all the way
-        # to nhat_cap.  He is a function of height above flotation, so it is
-        # 0 hundreds of metres below flotation whatever N's roundoff does,
-        # and it is continuous where the conditional was not.  The
-        # conditional stays as a harmless guard on the sign of N.
-        N_hat = He * conditional(gt(N, Constant(0.0)), N_hat, Constant(0.0))
+        # floor term nhat_floor * p_I / Nr amplified it all the way to
+        # nhat_cap.  He alone is not enough either: it is a smooth function
+        # of HAF, so a cell floating by a few metres sits inside the He band
+        # and still got He * nhat_cap (133 of 3791 floating cells on the
+        # ISMIP7 32 km MAP, Sep 2026).  He stays as the smooth factor the
+        # adjoint needs (dJ/dtheta -> 0 as He -> 0).
+        haf = height_above_flotation(H, b, rho_I=rho_I, rho_W=rho_W)
+        N_hat = He * conditional(gt(haf, Constant(0.0)), N_hat, Constant(0.0))
         return tau_W * N_hat
 
     # regularized_coulomb: harmonic blend -> tau_W at low speed, -> tau_cap

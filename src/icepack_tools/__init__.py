@@ -18,12 +18,13 @@ friction    Weertman/Budd/regularised-Coulomb basal stress, closed as
 viscosity   composite membrane and interlayer closures
 momentum    per-layer momentum balance and full single/multi-layer residuals
 parallel    rank-independent field statistics and control-vector gathers
+levelset    finite-volume level-set calving front for DG0 transport
 """
 
 from . import (constants, geometry, grounding, spaces, friction,  # noqa: F401
-               viscosity, momentum, parallel)
+               viscosity, momentum, parallel, levelset)
 
 __all__ = [
     "constants", "geometry", "grounding", "spaces", "friction", "viscosity",
-    "momentum", "parallel",
+    "momentum", "parallel", "levelset",
 ]
