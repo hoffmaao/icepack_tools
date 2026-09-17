@@ -323,13 +323,17 @@ def test_layer_count_guards():
 def test_budd_nhat_floor():
     """Budd's PISM floor: rejected without N_ref, pinned with it.
 
-    ``nx=40`` is deliberate: on this mesh ``p_I - p_W`` cancels to a
-    *positive* roundoff residue on part of the shelf instead of to 0, so
-    the ``gt(N, 0)`` gate inside the law passes there.  That is the
-    configuration the ``He`` gate exists for, and the one an ``N <= 0``
-    mask could never see.
+    ``nx=200`` puts grounded cell centroids within ``nhat_floor * H`` (~8 m)
+    of flotation, where the floor bites; at ``nx=40`` none did, and the
+    amplification the test used to see came only from floating cells whose
+    ``p_I - p_W`` cancelled to a *positive* roundoff residue, so that the
+    ``gt(N, 0)`` gate inside the law passed there.  That is the
+    configuration the HAF gate exists for (``He`` alone still let a cell
+    floating by a few metres through, inside the He band; see
+    ``friction_gate_test.py``), and the one an ``N <= 0`` mask could never
+    see.
     """
-    mesh, Q, H, b, s, u_obs = build(nx=40)
+    mesh, Q, H, b, s, u_obs = build(nx=200)
     C_w0 = weertman_anchor(H, s, u_obs, M_SLIDE, Q)
     theta = Function(Q)
     args = (u_obs, C_w0, theta, H, s, b, M_SLIDE)
@@ -374,7 +378,7 @@ def test_budd_nhat_floor():
     # bits of the cancelling difference p_I - p_W do.
     afloat = haf < -100.0            # ten grounding-zone widths below flotation
     grounded = haf > 100.0           # He is 1 to within 1.5e-9 there
-    gl_zone = (np.abs(haf) < 30.0) & (N.dat.data_ro > 0.0)   # the floor's remit
+    gl_zone = (haf > 0.0) & (haf < 30.0) & (N.dat.data_ro > 0.0)   # the floor's remit: grounded, near flotation
     assert afloat.any() and grounded.any() and gl_zone.any(), (
         "geometry must straddle the grounding line")
     residue = int((N.dat.data_ro[afloat] > 0.0).sum())       # reporting only
@@ -384,7 +388,7 @@ def test_budd_nhat_floor():
         return tau[mask] / (tW[mask] * He[mask])
 
     for label, tau in cases:
-        # He, not the sign of N, is what holds the shelf at zero
+        # HAF > 0, not the sign of N, is what holds the shelf at zero
         assert np.abs(tau[afloat]).max() == 0.0, (
             f"budd ({label}) must give bit-exact zero drag 100 m below "
             f"flotation; got {np.abs(tau[afloat]).max():.3e} MPa on "
@@ -395,7 +399,7 @@ def test_budd_nhat_floor():
             f"budd ({label}) breaks its nhat_cap * tau_W * He envelope, so "
             f"the grounded mask is not what bounds the drag")
 
-    # a frozen N_ref taken at this geometry gives N_hat = 1 wherever N > 0
+    # a frozen N_ref taken at this geometry gives N_hat = 1 wherever HAF > 0
     assert np.allclose(nhat_on(tau_0, grounded), 1.0), (
         f"N_ref frozen at the current geometry should give N_hat = 1, got "
         f"{nhat_on(tau_0, grounded).min()}..{nhat_on(tau_0, grounded).max()}")
@@ -419,7 +423,7 @@ def test_budd_nhat_floor():
           f"it, {n_amplified}/{gl_zone.sum()} grounding-zone cells amplify to "
           f"max {nhat.max():.2f} (cap {nhat_cap:.1f}), and nhat_floor=0.5 "
           f"saturates at the cap ({nhat_sat.max():.2f})")
-    print(f"  100 m below flotation He holds tau_b at exactly 0 on all "
+    print(f"  100 m below flotation the HAF gate holds tau_b at exactly 0 on all "
           f"{afloat.sum()} cells, floor or no floor -- including the "
           f"{residue} where p_I - p_W cancels to a positive residue and the "
           f"gt(N, 0) gate alone would have let nhat_cap * tau_W through")
