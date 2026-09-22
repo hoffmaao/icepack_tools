@@ -648,9 +648,24 @@ class LevelSet:
 
     def _mark_interface_cells(self):
         r"""Cells sharing a face with an opposite-sign cell are the anchors
-        of a reinitialisation: they are reset to their exact distance from
-        the zero contour of the lumped P1 interpolant (sign kept), so the
-        front stays put and the marched field inherits no distortion."""
+        of a reinitialisation: they are reset to their exact signed
+        distance from the zero contour of the lumped P1 interpolant, so the
+        front stays put and the marched field inherits no distortion.
+
+        The sign comes from the same interpolant, at the cell centroid,
+        not from the cell's own value.  The two disagree only where the
+        cell-wise field carries a feature the interpolant does not: an
+        isolated cell of the opposite sign.  Such a cell makes no zero
+        contour in the interpolant, so keeping its sign while measuring
+        the distance to the interpolant's contour wrote back the distance
+        to the nearest real front -- a one-cell pocket of water 6 km inside
+        the ice read phi = +6.75 km and was permanent (CalvingMIP
+        experiment 4 on Thule's ridges, where the rate law drives interior
+        floating cells between grounded ones across zero between
+        reinitialisations).  ISSM's reset takes sign and contour from one
+        nodal field, and its ice mask is "any vertex negative"; the
+        centroid sign of the interpolant is that rule for a cell-wise
+        field.  Cells the interpolant does not cut keep their sign."""
         sgn = Function(self.Q0)
         sgn.dat.data[:] = np.where(self.phi.dat.data_ro > 0, 1.0, -1.0)
         psi = TestFunction(self.Q0)
@@ -672,11 +687,13 @@ class LevelSet:
         # exchange and writing ``dat.data`` invalidates one, both of which
         # are collective.  A rank that owns no interface cell and skipped
         # them left the others waiting at the next assembly.
-        sgn_data = sgn.dat.data_ro
+        n_own = len(self.phi.dat.data_ro)
+        # the interpolant at the centroid: the mean of its vertex values
+        sgn_lift = np.where(pc[:n_own].mean(axis=1) > 0.0, 1.0, -1.0)
         phi_data = self.phi.dat.data
         if len(seg_a) and fix.any():
             dist = _segment_distance(self.cell_xc[fix], seg_a, seg_b)
-            phi_data[fix] = sgn_data[fix] * dist
+            phi_data[fix] = sgn_lift[fix] * dist
 
     def reinitialise(self):
         r"""Fixed-point sweeps of the linearised eikonal equation away from
