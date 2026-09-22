@@ -119,13 +119,15 @@ adjacent to the front, so front nodes are not slowed by the drag of the
 water cells they touch.
 
 Ported from ``ismip7/icepack2_tools/levelset.py`` with the ``prescribed``
-law added and one parallel fix: the reinitialisation's interface reset
+law added and two fixes to the reinitialisation's interface reset.  It
 used to touch the level-set data only on ranks that owned an interface
 cell, and the halo exchange that access implies is collective, so a
-rank with none of the front deadlocked the next assembly.  The tests in
+rank with none of the front deadlocked the next assembly.  And it kept
+each cell's own sign, which made an isolated opposite-sign cell
+permanent (see ``LevelSet._mark_interface_cells``).  The tests in
 ``test/levelset_test.py`` are that module's tests plus one for the new
-law, and they run again on three ranks so a front owned by one rank is
-covered.
+law and one for the isolated cells, and they run again on three ranks so
+a front owned by one rank is covered.
 
 Units: metres, years, MPa (icepack conventions).
 """
