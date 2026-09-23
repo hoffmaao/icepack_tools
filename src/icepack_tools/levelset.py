@@ -114,8 +114,7 @@ Laws (:data:`LAWS`):
                 the run's own fluidity, and separate thresholds for
                 grounded and floating ice.  Morlighem et al. calibrate
                 the threshold per basin; 1 MPa grounded and 150 kPa
-                floating are the values in common use, and the ones the
-                CalvingMIP submissions ran with.
+                floating are widely used defaults.
 
 The momentum balance needs no front term: with DG0 geometry the facet
 term ``rho_I g avg(h) jump(s)`` at an ice/no-ice face IS the terminus
