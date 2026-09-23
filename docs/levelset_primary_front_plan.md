@@ -1,5 +1,12 @@
 # Level set as the primary front
 
+> **Historical record.** This plan records what was decided on 5 September
+> 2026 and is kept as it was written. Its references to ISSM source files and
+> defaults are observations of one ISSM revision on that date, not citations.
+> For the method's citations see the `src/icepack_tools/levelset.py` module
+> docstring: Hahn, Mikula and Frolkovic (2025) for the eikonal boundary
+> condition, and Bondzio et al. (2016) for the front kinematics.
+
 Plan of record, 5 September 2026. Companion to `src/icepack_tools/levelset.py`.
 A phased plan to move the ice-front treatment from a thickness-anchored level
 set to the convention ISSM uses, where the level set carries the front,
