@@ -2,7 +2,10 @@ r"""Level-set calving front for a DG0 thickness transport on a buffered mesh.
 
 Cell-centred finite-volume level set after Hahn, Mikula & Frolkovic (2025,
 arXiv:2504.05845, "Eikonal boundary condition for level set method"), with
-the front kinematics of the ISSM level-set method (Bondzio et al. 2016):
+the calving-front kinematics of Bondzio et al. (2016, The Cryosphere 10,
+497-510, doi:10.5194/tc-10-497-2016).  The eikonal boundary condition is
+what distinguishes this from a level set that needs Dirichlet data on the
+mesh edge, and it is why the front can live on a buffered mesh:
 
 * ``phi`` lives in DG0 on the SAME cells as the transport thickness: a
   signed distance to the ice front, **negative in ice, positive in open
@@ -41,9 +44,10 @@ idealised MIP, a forced retreat scenario).
   frontal ablation rate ``c`` as a normal shrinking speed).  The
   normal-flow term is linearised semi-implicitly with the previous step's
   unit gradient, ``c |grad phi| ~ c n^k . grad phi^{k+1}``,
-  ``n^k = grad phi^k / |grad phi^k|`` (the paper's treatment; ISSM
-  linearises the same way), so each step is one linear advection with
-  velocity ``w = u_ext - c n``.
+  ``n^k = grad phi^k / |grad phi^k|`` (the treatment of Hahn et al.), so
+  each step is one linear advection with velocity ``w = u_ext - c n``.
+  That velocity is the one of Bondzio et al. (2016, Eqs. 4-7), whose
+  boundary moves at ``w . n = u . n - c``.
 * Discretisation: finite volumes on the DG0 cells, cell gradients by a
   least-squares fit over the centroid differences to the face neighbours
   (exact for linear fields on any cell with two non-collinear neighbours,
@@ -76,9 +80,11 @@ idealised MIP, a forced retreat scenario).
   with the stencil and the cosine weights updated in between.  The
   initial condition is the exact geometric signed distance to the
   ice/water facets.
-* The ice velocity is needed beyond the front; ISSM's Laplace extension
-  (a harmonic extension with the ice-node values as Dirichlet data) is
-  used, and the ablation rate is extended the same way.
+* The ice velocity is needed beyond the front.  A harmonic extension with
+  the ice-node values as Dirichlet data is used, and the ablation rate is
+  extended the same way; this plays the role of the constant-along-the-
+  normal extension ``n . grad S = 0`` of Bondzio et al. (2016, Eq. 9),
+  after Zhao et al. (1996).
 
 Both anchors share every piece of the discretisation below: the
 least-squares cell gradients, the linear-upwind faces, the linearised
@@ -106,7 +112,10 @@ Laws (:data:`LAWS`):
                 ``eps~^2 = (max(eps1,0)^2 + max(eps2,0)^2) / 2`` from the
                 principal horizontal strain rates, ``B = A^(-1/n)`` from
                 the run's own fluidity, and separate thresholds for
-                grounded and floating ice (ISSM defaults 1 MPa / 150 kPa).
+                grounded and floating ice.  Morlighem et al. calibrate
+                the threshold per basin; 1 MPa grounded and 150 kPa
+                floating are the values in common use, and the ones the
+                CalvingMIP submissions ran with.
 
 The momentum balance needs no front term: with DG0 geometry the facet
 term ``rho_I g avg(h) jump(s)`` at an ice/no-ice face IS the terminus
@@ -664,10 +673,12 @@ class LevelSet:
         the ice read phi = +6.75 km and was permanent (CalvingMIP
         experiment 4 on Thule's ridges, where the rate law drives interior
         floating cells between grounded ones across zero between
-        reinitialisations).  ISSM's reset takes sign and contour from one
-        nodal field, and its ice mask is "any vertex negative"; the
-        centroid sign of the interpolant is that rule for a cell-wise
-        field.  Cells the interpolant does not cut keep their sign."""
+        reinitialisations).  Sign and distance have to come from the same
+        field or a feature one of them cannot represent survives forever.
+        Taking the sign at the centroid of the interpolant is also the
+        cell-wise reading of the "any vertex inside is ice" mask that a
+        nodal level set uses (Bondzio et al., 2016, Sect. 2.3).  Cells the
+        interpolant does not cut keep their sign."""
         sgn = Function(self.Q0)
         sgn.dat.data[:] = np.where(self.phi.dat.data_ro > 0, 1.0, -1.0)
         psi = TestFunction(self.Q0)
