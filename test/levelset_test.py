@@ -179,6 +179,35 @@ def test_reinitialisation_restores_distance():
     assert len(gathered(ls, phi)) == NX * NY * 2
 
 
+def test_reinitialisation_heals_isolated_cells():
+    r"""A one-cell pocket of water 10 km inside the front and a one-cell
+    island of ice 10 km outside it.  Neither makes a zero contour in the
+    lumped interpolant, so a reset that kept the cell's own sign wrote
+    back +/-(distance to the real front) and made both permanent: a pocket
+    6 km inside the Thule ice read phi = +6.75 km.  Sign and distance from
+    the same contour heal both, and the front does not move."""
+    mesh, h, ls, *_ = make_case(reinit_sweeps=8)
+    xc, yc = along(ls), across(ls)
+    phi = ls.phi.dat.data
+    planted = {}
+    for name, x_target, value in (("pocket", X0 - 10 * DX, +3 * DX),
+                                  ("island", X0 + 10 * DX, -3 * DX)):
+        sel = np.flatnonzero(np.hypot(xc - x_target, yc - W / 2) < 0.6 * DX)
+        sel = sel[:1]                    # one cell, on whichever rank owns it
+        phi[sel] = value
+        planted[name] = sel
+    assert ls.comm.allreduce(len(planted["pocket"])) == 1
+    assert ls.comm.allreduce(len(planted["island"])) == 1
+    ls.reinitialise()
+    phi = ls.phi.dat.data_ro
+    for name, sign in (("pocket", -1.0), ("island", +1.0)):
+        for i in planted[name]:
+            exact = xc[i] - X0
+            assert np.sign(phi[i]) == sign, f"{name} still has the wrong sign: {phi[i]:.0f} m"
+            assert abs(phi[i] - exact) < 0.5 * DX, f"{name}: {phi[i]:.0f} m vs {exact:.0f} m"
+    assert abs(front_x(ls) - X0) < 0.25 * DX
+
+
 def test_von_mises_rate_uniform_extension():
     mesh, h, ls, u, b, A = make_case(law="vonmises", sigma_max_floating=0.15)
     xa = fd.SpatialCoordinate(mesh)[AX]
@@ -322,6 +351,8 @@ def main():
          test_free_front_advances_and_eikonal_bc_holds_inflow_edge),
         ("fixed front holds", test_fixed_front_does_not_move),
         ("reinitialisation restores the distance", test_reinitialisation_restores_distance),
+        ("reinitialisation heals a one-cell pocket and a one-cell island",
+         test_reinitialisation_heals_isolated_cells),
         ("von Mises rate", test_von_mises_rate_uniform_extension),
         ("prescribed rate balances / retreats / varies",
          test_prescribed_rate_balances_and_retreats),
@@ -343,7 +374,7 @@ def main():
         PETSc.Sys.Print(f"\nPASS on {size} ranks")
         return 0
 
-    PETSc.Sys.Print("\n12. the same on three ranks, front across the short axis")
+    PETSc.Sys.Print("\n13. the same on three ranks, front across the short axis")
     mpiexec = shutil.which("mpiexec")
     if mpiexec is None:
         print("  [skip] no mpiexec on PATH -- the parallel half of this test "
