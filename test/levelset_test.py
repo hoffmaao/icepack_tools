@@ -19,8 +19,9 @@ that make a front law meaningful in a forward run:
 6. the ``prescribed`` law refuses to run without a rate, and the level set
    knows no calving law by name (they are rates, in
    ``icepack_tools.calving``, tested in ``calving_test.py``);
-7. the front normal is the current extent's from construction on, so a
-   law evaluated before the first advance reads the right one;
+7. the front normal is the current front's from construction on, so a
+   law evaluated before the first advance reads the right one, and a rate
+   that reads it during an advected step sees the front as it is then;
 8. all of the above again on three ranks, with the case rotated so the
    front crosses the short axis: the partitioner's bands then put the
    whole front on one rank and the others own no interface cell, which
@@ -350,6 +351,20 @@ def test_the_front_normal_is_current_from_construction():
     assert np.allclose(ls.ghat.dat.data_ro[inner_cells], unit, atol=1e-6)
 
 
+def test_an_advected_rate_reads_the_current_normal():
+    r"""On the ``advect`` anchor the rate is built from ``ghat`` of the
+    current phi, not of the one at construction: turn the front to run
+    along the flow and advance with a rate ``K ghat . e_across``, which is
+    ``K`` if the rate read the new normal and zero if it read the old."""
+    mesh, h, ls, u, b = make_case(law="prescribed")
+    ls.phi.dat.data[:] = across(ls) - W / 2
+    K = 250.0
+    ls.advance(1e-3, u, rate=K * ls.ghat[1 - AX])
+    near = np.abs(across(ls) - W / 2) < 2 * DX
+    assert np.allclose(ls.c_cell.dat.data_ro[near], K, rtol=1e-3), \
+        ls.c_cell.dat.data_ro[near]
+
+
 def main():
     tests = [
         ("segment distance", test_segment_distance_exact),
@@ -366,6 +381,8 @@ def main():
          test_prescribed_law_needs_a_rate),
         ("the front normal is current from construction",
          test_the_front_normal_is_current_from_construction),
+        ("an advected rate reads the current front normal",
+         test_an_advected_rate_reads_the_current_normal),
         ("extent anchor: distance to the ice extent",
          test_extent_anchor_is_the_distance_to_the_ice_extent),
         ("extent anchor: follows the transport",

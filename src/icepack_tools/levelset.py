@@ -109,8 +109,9 @@ The level set holds no calving physics.  A calving law (von Mises,
 horizontal force balance, minimum thickness, ...) is a rate, defined in
 :mod:`icepack_tools.calving` and evaluated by the caller on the state it
 reads, front normal included: ``ghat`` is refreshed with every eikonal
-solve and at construction, so a law reads the normal of the current
-extent at every step, the first included.  An imposed rate (submarine
+solve, at the start of every advected step and at construction, so a
+law reads the normal of the current front at every step, the first
+included.  An imposed rate (submarine
 melt undercutting a grounded tidewater front, a frontal ablation
 scenario) goes in the same way.
 
@@ -759,6 +760,11 @@ class LevelSet:
             self.update_cell_fields()
             return 0.0
         t0 = perf_counter()
+        # The unit gradient and stencil of the current phi, before the rate
+        # is evaluated: a law reads ghat as the front normal, and the
+        # level-set step uses the same gradient.
+        self.phi_old.assign(self.phi)
+        self._update_unit_gradient()
         # Ablation rate on ice as a lumped CG1 field (a law's rate is
         # cell-wise, so a low-order rule is exact enough).
         c_expr = self._rate_expr(rate)
@@ -780,10 +786,6 @@ class LevelSet:
         self._ext_solver.solve()
         self.c_cell.interpolate(self.w_ext[2])
         t1 = perf_counter()
-        # Level-set step with the unit gradient and stencil of the previous
-        # state (phi_old must be current before the stencil is chosen).
-        self.phi_old.assign(self.phi)
-        self._update_unit_gradient()
         self.dt_c.assign(dt)
         self._ls_solver.solve()
         t2 = perf_counter()
