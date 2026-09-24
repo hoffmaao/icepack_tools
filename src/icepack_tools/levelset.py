@@ -82,9 +82,11 @@ idealised MIP, a forced retreat scenario).
   ice/water facets.
 * The ice velocity is needed beyond the front.  A harmonic extension with
   the ice-node values as Dirichlet data is used, and the ablation rate is
-  extended the same way; this plays the role of the constant-along-the-
-  normal extension ``n . grad S = 0`` of Bondzio et al. (2016, Eq. 9),
-  after Zhao et al. (1996).
+  extended the same way, from its area-weighted mean over the ice cells
+  inside the front at each of their vertices and from nowhere else; this
+  plays the role of the constant-along-the-normal extension
+  ``n . grad S = 0`` of Bondzio et al. (2016, Eq. 9), after Zhao et al.
+  (1996).
 
 Both anchors share every piece of the discretisation below: the
 least-squares cell gradients, the linear-upwind faces, the linearised
@@ -146,6 +148,8 @@ from mpi4py import MPI as _MPI
 from scipy.spatial import cKDTree
 
 import firedrake as fd
+from finat.point_set import PointSet
+from finat.quadrature import QuadratureRule
 from firedrake import (
     Constant, Function, FunctionSpace, VectorFunctionSpace, TestFunction,
     TrialFunction, SpatialCoordinate, CellDiameter, FacetNormal, assemble,
@@ -513,9 +517,19 @@ class LevelSet:
         vw = TestFunction(W)
         hc = CellDiameter(mesh)
         pen = Constant(1e4) / hc ** 2
+        # The penalty is integrated with the vertex rule, so it is lumped:
+        # it pins each ice node to its datum and touches no water node.
+        # Integrated exactly, ``ice_node * w * v`` is nonzero on every cell
+        # with one ice vertex and pulled the first ring of water nodes
+        # toward whatever ``w_src`` held there -- which for the rate is
+        # nothing, and for the velocity the momentum solve's values in
+        # cells with no ice.  The extension must read ice nodes alone.
+        vertex_rule = QuadratureRule(
+            PointSet([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]), [1.0 / 6.0] * 3)
+        dxv = dx(scheme=vertex_rule)
         a_ext = (inner(grad(w), grad(vw)) * dx
-                 + pen * self.ice_node * inner(w, vw) * dx)
-        L_ext = pen * self.ice_node * inner(self.w_src, vw) * dx
+                 + pen * self.ice_node * inner(w, vw) * dxv)
+        L_ext = pen * self.ice_node * inner(self.w_src, vw) * dxv
         self._ext_solver = (fd.LinearVariationalSolver(
             fd.LinearVariationalProblem(a_ext, L_ext, self.w_ext),
             solver_parameters={"ksp_type": "cg", "pc_type": "gamg",
@@ -728,9 +742,20 @@ class LevelSet:
     # ------------------------------------------------------------------
     # Ablation rate
     # ------------------------------------------------------------------
-    def _ice_node_indicator(self):
-        chi = Function(self.Q0)
-        chi.dat.data[:] = np.where(self.h_dg.dat.data_ro > self.h_min, 1.0, 0.0)
+    def _ice_cell_indicator(self):
+        r"""DG0 indicator of the cells the front reads its rate from: ice
+        (``h > h_min``) inside the front (``phi <= 0``).  A cell beyond the
+        front holds at most what the front left behind on its way out or
+        carried in on its way through, not an ice column of its own, so
+        neither its thickness nor a law evaluated on it means anything."""
+        chi = Function(self.Q0, name="ice_cell_inside")
+        chi.dat.data[:] = np.where((self.h_dg.dat.data_ro > self.h_min)
+                                   & (self.phi.dat.data_ro <= 0.0), 1.0, 0.0)
+        return chi
+
+    def _ice_node_indicator(self, chi):
+        r"""CG1 indicator of the vertices of the cells ``chi`` flags: the
+        Dirichlet nodes of the extension into the water."""
         num = assemble(chi * TestFunction(self.Q1) * dx)
         self.ice_node.dat.data[:] = np.where(num.dat.data_ro > 0.0, 1.0, 0.0)
 
@@ -766,13 +791,28 @@ class LevelSet:
         self.phi_old.assign(self.phi)
         self._update_unit_gradient()
         # Ablation rate on ice as a lumped CG1 field (a law's rate is
-        # cell-wise, so a low-order rule is exact enough).
+        # cell-wise, so a low-order rule is exact enough), each node the
+        # area-weighted mean of the ICE cells around it alone.  A rate
+        # means nothing in the cells beyond the front: a law gated on the
+        # grounded indicator is ungated there, a stress law reads a dual
+        # state with no ice in it.  Lumping those cells in as well handed
+        # a front node on grounded ice a good fraction of the gated-off
+        # rate, and a cell the front then crossed left the gate for good
+        # -- CalvingMIP experiment 4's front cut across Thule's grounded
+        # ridges that way and lost 17 % of the grounded area where the
+        # ensemble lost 3 %.  The extension's Dirichlet nodes are these
+        # same cells' vertices, so every node it holds has ice data.
+        chi = self._ice_cell_indicator()
         c_expr = self._rate_expr(rate)
-        c_num = assemble(c_expr * TestFunction(self.Q1) * dx(degree=2))
-        lump = assemble(TestFunction(self.Q1) * dx)
-        self.c_rate.dat.data[:] = c_num.dat.data_ro / lump.dat.data_ro
+        v = TestFunction(self.Q1)
+        c_num_f = assemble(chi * c_expr * v * dx(degree=2))
+        lump_f = assemble(chi * v * dx)
+        c_num, lump = c_num_f.dat.data_ro, lump_f.dat.data_ro
+        has_ice = lump > 0.0
+        self.c_rate.dat.data[:] = np.where(
+            has_ice, c_num / np.where(has_ice, lump, 1.0), 0.0)
         # Extend (u, c) from ice nodes into the water.
-        self._ice_node_indicator()
+        self._ice_node_indicator(chi)
         ws = self.w_src.dat.data
         ws[:, 0] = u.dat.data_ro[:, 0]
         ws[:, 1] = u.dat.data_ro[:, 1]
