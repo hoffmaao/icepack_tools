@@ -13,19 +13,22 @@ that make a front law meaningful in a forward run:
 3. with the ``fixed`` law the front does not move at all;
 4. reinitialisation restores ``|grad phi| = 1`` from a distorted field and
    leaves the zero contour where it was;
-5. the von Mises rate for uniform extension is
-   sqrt(3) B eps^(1/n) |u| / sigma_max;
-6. a ``prescribed`` rate equal to U holds the front still (advance and
+5. a ``prescribed`` rate equal to U holds the front still (advance and
    retreat cancel), one larger than U retreats it at c - U, and a
    spatially varying rate is honoured where it is given;
-7. the ``prescribed`` law refuses to run without a rate;
+6. the ``prescribed`` law refuses to run without a rate, and the level set
+   knows no calving law by name (they are rates, in
+   ``icepack_tools.calving``, tested in ``calving_test.py``);
+7. the front normal is the current front's from construction on, so a
+   law evaluated before the first advance reads the right one, and a rate
+   that reads it during an advected step sees the front as it is then;
 8. all of the above again on three ranks, with the case rotated so the
    front crosses the short axis: the partitioner's bands then put the
    whole front on one rank and the others own no interface cell, which
    is the case that deadlocked the reinitialisation before the port (a
    rank-conditional halo access inside a collective sequence).
 
-Ported from ``ismip7/tests/test_levelset.py``; 6-8 are new.
+Ported from ``ismip7/tests/test_levelset.py``; 5-8 are new.
 
     python -u levelset_test.py        (or pytest, serial part only)
 """
@@ -72,8 +75,7 @@ def make_case(law="none", **kw):
     vel[AX] = Constant(U)
     u = Function(V).interpolate(fd.as_vector(vel))
     b = Function(Q0).assign(-1000.0)          # deep water: floating
-    A = Constant(50.0)                         # MPa^-3 yr^-1 (warm-ish ice)
-    return mesh, h, ls, u, b, A
+    return mesh, h, ls, u, b
 
 
 def along(ls):
@@ -141,10 +143,10 @@ def test_initialisation_is_signed_distance():
 
 
 def test_free_front_advances_and_eikonal_bc_holds_inflow_edge():
-    mesh, h, ls, u, b, A = make_case(law="none", reinit_every=0)
+    mesh, h, ls, u, b = make_case(law="none", reinit_every=0)
     dt = 0.5
     for _ in range(10):
-        ls.advance(dt, u, h, b)
+        ls.advance(dt, u)
     expected = X0 + U * dt * 10
     assert abs(front_x(ls) - expected) < 0.25 * DX
     phi = ls.phi.dat.data_ro
@@ -158,9 +160,9 @@ def test_free_front_advances_and_eikonal_bc_holds_inflow_edge():
 
 
 def test_fixed_front_does_not_move():
-    mesh, h, ls, u, b, A = make_case(law="fixed")
+    mesh, h, ls, u, b = make_case(law="fixed")
     for _ in range(5):
-        ls.advance(1.0, u, h, b)
+        ls.advance(1.0, u)
     assert abs(front_x(ls) - X0) < 1e-6 * L
 
 
@@ -208,34 +210,14 @@ def test_reinitialisation_heals_isolated_cells():
     assert abs(front_x(ls) - X0) < 0.25 * DX
 
 
-def test_von_mises_rate_uniform_extension():
-    mesh, h, ls, u, b, A = make_case(law="vonmises", sigma_max_floating=0.15)
-    xa = fd.SpatialCoordinate(mesh)[AX]
-    eps = 1e-3   # 1/yr
-    vel = [Constant(0.0), Constant(0.0)]
-    vel[AX] = eps * xa
-    u.interpolate(fd.as_vector(vel))
-    n = 3.0
-    c_expr = ls.calving_rate_expr(u, h, b, A, n)
-    Q1 = FunctionSpace(mesh, "CG", 1)
-    c = Function(Q1).interpolate(c_expr)
-    B = float(A) ** (-1.0 / n)
-    sigma = np.sqrt(3.0) * B * (np.sqrt(eps ** 2 / 2)) ** (1.0 / n)
-    xn = mesh.coordinates.dat.data_ro[:, AX]
-    inside = (xn > 0.2 * L) & (xn < 0.45 * L)
-    expected = eps * xn[inside] * sigma / 0.15
-    if inside.any():
-        assert np.allclose(c.dat.data_ro[inside], expected, rtol=2e-2)
-
-
 def test_prescribed_rate_balances_and_retreats():
-    mesh, h, ls, u, b, A = make_case(law="prescribed", reinit_every=4)
+    mesh, h, ls, u, b = make_case(law="prescribed", reinit_every=4)
     dt, nsteps = 0.5, 8
     for c_val, motion in ((U, 0.0), (2 * U, -U)):
         ls.initialise_from_thickness()
         ls.update_cell_fields()
         for _ in range(nsteps):
-            ls.advance(dt, u, h, b, rate=Constant(c_val))
+            ls.advance(dt, u, rate=Constant(c_val))
         expected = X0 + motion * dt * nsteps
         assert abs(front_x(ls) - expected) < 0.35 * DX, (c_val, front_x(ls))
     ice = h.dat.data_ro > 1.0
@@ -255,7 +237,7 @@ def test_prescribed_rate_balances_and_retreats():
     rate = Function(Q1).interpolate(
         fd.conditional(ya < W / 2, Constant(2 * U), Constant(U)))
     for _ in range(nsteps):
-        ls.advance(dt, u, h, b, rate=rate)
+        ls.advance(dt, u, rate=rate)
     yc = across(ls)
     lower = yc < W / 2 - 3 * DX
     upper = yc > W / 2 + 3 * DX
@@ -268,7 +250,7 @@ def test_extent_anchor_is_the_distance_to_the_ice_extent():
     condition at the ice extent: phi is the exact signed distance to the
     ice/water facets, the front length per cell sums to the domain width,
     and no ice cell is flagged for removal."""
-    mesh, h, ls, u, b, A = make_case(anchor="extent")
+    mesh, h, ls, u, b = make_case(anchor="extent")
     phi = ls.phi.dat.data_ro
     assert np.allclose(phi, along(ls) - X0, atol=1e-6 * L)
     ice = h.dat.data_ro > 1.0
@@ -283,12 +265,12 @@ def test_extent_anchor_is_the_distance_to_the_ice_extent():
 def test_extent_anchor_follows_the_transport():
     r"""Advance is the transport's job: the level set follows the thickness
     extent and never flags a cell while the front only grows."""
-    mesh, h, ls, u, b, A = make_case(anchor="extent")
-    ls.advance(0.5, u, h, b, A, 3.0)
+    mesh, h, ls, u, b = make_case(anchor="extent")
+    ls.advance(0.5, u)
     assert not ls.calving_masks()[0].any()
     xa = fd.SpatialCoordinate(mesh)[AX]
     h.interpolate(fd.conditional(xa < X0 + DX, Constant(H_ICE), Constant(0.0)))
-    ls.advance(0.5, u, h, b, A, 3.0)
+    ls.advance(0.5, u)
     assert np.allclose(ls.phi.dat.data_ro, along(ls) - (X0 + DX), atol=1e-6 * L)
     assert not ls.calving_masks()[0].any()
 
@@ -297,9 +279,9 @@ def test_extent_anchor_retreats_and_sheds_the_right_mass():
     r"""Normal-flow retreat at a constant rate moves the front by ``c dt``
     and flags the cells it passed; a sub-cell retreat sheds exactly
     ``c h L dt`` of mass instead."""
-    mesh, h, ls, u, b, A = make_case(law="prescribed", anchor="extent")
+    mesh, h, ls, u, b = make_case(law="prescribed", anchor="extent")
     dt, c_big = 0.5, 5000.0                     # c dt = 2500 m > a cell
-    ls.advance(dt, u, h, b, rate=Constant(c_big))
+    ls.advance(dt, u, rate=Constant(c_big))
     xc, ice = along(ls), h.dat.data_ro > 1.0
     inside = ice & (xc > 0.2 * L)
     assert np.allclose(ls.phi.dat.data_ro[inside],
@@ -308,9 +290,9 @@ def test_extent_anchor_retreats_and_sheds_the_right_mass():
     assert beyond[ice & (xc > X0 - c_big * dt)].all()
     assert not beyond[ice & (xc < X0 - c_big * dt - DX)].any()
 
-    mesh, h, ls, u, b, A = make_case(law="prescribed", anchor="extent")
+    mesh, h, ls, u, b = make_case(law="prescribed", anchor="extent")
     dt, c_small = 0.1, 100.0                    # c dt = 10 m << a cell
-    ls.advance(dt, u, h, b, rate=Constant(c_small))
+    ls.advance(dt, u, rate=Constant(c_small))
     beyond, frac = ls.calving_masks()
     assert not beyond.any()
     shed = ls.comm.allreduce(
@@ -328,19 +310,59 @@ def test_anchor_name_is_checked():
 
 
 def test_prescribed_law_needs_a_rate():
-    mesh, h, ls, u, b, A = make_case(law="prescribed")
+    mesh, h, ls, u, b = make_case(law="prescribed")
     try:
-        ls.advance(0.5, u, h, b)
+        ls.advance(0.5, u)
     except ValueError as e:
         assert "rate" in str(e)
     else:
         raise AssertionError("prescribed law ran without a rate")
-    try:
-        LevelSet(mesh, h, law="undercut")
-    except ValueError as e:
-        assert str(LAWS) in str(e)
-    else:
-        raise AssertionError("unknown law accepted")
+    # a calving law is a rate, not a way for the level set to move
+    for law in ("undercut", "vonmises"):
+        try:
+            LevelSet(mesh, h, law=law)
+        except ValueError as e:
+            assert str(LAWS) in str(e)
+        else:
+            raise AssertionError(f"level set accepted the law {law!r}")
+
+
+def test_the_front_normal_is_current_from_construction():
+    r"""``ghat`` is what a calving law reads as the front normal.  It must be
+    the current extent's before the first advance (a law is evaluated
+    before the level set moves) and after every eikonal solve."""
+    unit = [0.0, 0.0]
+    unit[AX] = 1.0
+    for anchor in ("advect", "extent"):
+        mesh, h, ls, u, b = make_case(law="prescribed", anchor=anchor)
+        near = np.abs(ls.phi.dat.data_ro) < 2 * DX
+        inner_cells = near & (ls.chi_bnd.dat.data_ro < 0.5)
+        assert np.allclose(ls.ghat.dat.data_ro[inner_cells], unit, atol=1e-6), anchor
+    # the extent moves back two cells; the next eikonal solve puts the
+    # front there and the normal with it
+    mesh, h, ls, u, b = make_case(law="prescribed", anchor="extent")
+    xa = fd.SpatialCoordinate(mesh)[AX]
+    h.interpolate(fd.conditional(xa < X0 - 2 * DX, Constant(H_ICE), Constant(0.0)))
+    ls.ghat.assign(0.0)
+    ls.solve_eikonal_from_extent()
+    assert abs(front_x(ls) - (X0 - 2 * DX)) < 1e-6 * L
+    near = np.abs(ls.phi.dat.data_ro) < 2 * DX
+    inner_cells = near & (ls.chi_bnd.dat.data_ro < 0.5)
+    assert np.allclose(ls.ghat.dat.data_ro[inner_cells], unit, atol=1e-6)
+
+
+def test_an_advected_rate_reads_the_current_normal():
+    r"""On the ``advect`` anchor the rate is built from ``ghat`` of the
+    current phi, not of the one at construction: turn the front to run
+    along the flow and advance with a rate ``K ghat . e_across``, which is
+    ``K`` if the rate read the new normal and zero if it read the old."""
+    mesh, h, ls, u, b = make_case(law="prescribed")
+    ls.phi.dat.data[:] = across(ls) - W / 2
+    K = 250.0
+    ls.advance(1e-3, u, rate=K * ls.ghat[1 - AX])
+    near = np.abs(across(ls) - W / 2) < 2 * DX
+    assert np.allclose(ls.c_cell.dat.data_ro[near], K, rtol=1e-3), \
+        ls.c_cell.dat.data_ro[near]
 
 
 def main():
@@ -353,10 +375,14 @@ def main():
         ("reinitialisation restores the distance", test_reinitialisation_restores_distance),
         ("reinitialisation heals a one-cell pocket and a one-cell island",
          test_reinitialisation_heals_isolated_cells),
-        ("von Mises rate", test_von_mises_rate_uniform_extension),
         ("prescribed rate balances / retreats / varies",
          test_prescribed_rate_balances_and_retreats),
-        ("prescribed law refuses to run blind", test_prescribed_law_needs_a_rate),
+        ("prescribed law refuses to run blind, and no law is built in",
+         test_prescribed_law_needs_a_rate),
+        ("the front normal is current from construction",
+         test_the_front_normal_is_current_from_construction),
+        ("an advected rate reads the current front normal",
+         test_an_advected_rate_reads_the_current_normal),
         ("extent anchor: distance to the ice extent",
          test_extent_anchor_is_the_distance_to_the_ice_extent),
         ("extent anchor: follows the transport",
@@ -374,7 +400,7 @@ def main():
         PETSc.Sys.Print(f"\nPASS on {size} ranks")
         return 0
 
-    PETSc.Sys.Print("\n13. the same on three ranks, front across the short axis")
+    PETSc.Sys.Print(f"\n{len(tests) + 1}. the same on three ranks, front across the short axis")
     mpiexec = shutil.which("mpiexec")
     if mpiexec is None:
         print("  [skip] no mpiexec on PATH -- the parallel half of this test "
