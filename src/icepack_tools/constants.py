@@ -6,4 +6,5 @@ from icepack2.constants import (  # noqa: F401
     gravity,
     glen_flow_law,
     weertman_sliding_law,
+    year,
 )

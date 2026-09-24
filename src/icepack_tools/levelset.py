@@ -90,31 +90,29 @@ Both anchors share every piece of the discretisation below: the
 least-squares cell gradients, the linear-upwind faces, the linearised
 eikonal operator and its upwind (fast-marching-causal) stencil.
 
-Laws (:data:`LAWS`):
+How the front moves (:data:`LAWS`):
 
 ``none``        ``c = 0``; the front is free to advance and never calves.
 ``fixed``       the level set is frozen at its t = 0 position: a
                 no-advance barrier expressed through ``phi``.
 ``prescribed``  ``c`` is whatever the caller passes to :meth:`LevelSet.advance`
                 as ``rate`` -- a Constant, a Function or a UFL expression
-                on ice, in m/yr of normal face retreat.  This is the law
-                for a *forcing* experiment: submarine melt undercutting a
-                grounded tidewater front (Store), or an imposed frontal
-                ablation scenario.  The front then retreats exactly where
-                ``c`` exceeds the ice speed into it, whatever the
-                thickness of the cell it happens to be in -- which a
-                thickness sink applied to front cells cannot do, since a
-                thin front cell fed from a thick one refills within a
-                step and the sink never reaches the thick cell behind.
-``vonmises``    Morlighem et al. 2016 (*GRL* 43): ``c = |u| sigma~ / sigma_max``
-                with the tensile von Mises stress
-                ``sigma~ = sqrt(3) B eps~^(1/n)``,
-                ``eps~^2 = (max(eps1,0)^2 + max(eps2,0)^2) / 2`` from the
-                principal horizontal strain rates, ``B = A^(-1/n)`` from
-                the run's own fluidity, and separate thresholds for
-                grounded and floating ice.  Morlighem et al. calibrate
-                the threshold per basin; 1 MPa grounded and 150 kPa
-                floating are widely used defaults.
+                on ice, in m/yr of normal face retreat.  The front then
+                retreats exactly where ``c`` exceeds the ice speed into
+                it, whatever the thickness of the cell it happens to be
+                in -- which a thickness sink applied to front cells cannot
+                do, since a thin front cell fed from a thick one refills
+                within a step and the sink never reaches the thick cell
+                behind.
+
+The level set holds no calving physics.  A calving law (von Mises,
+horizontal force balance, minimum thickness, ...) is a rate, defined in
+:mod:`icepack_tools.calving` and evaluated by the caller on the state it
+reads, front normal included: ``ghat`` is refreshed with every eikonal
+solve and at construction, so a law reads the normal of the current
+extent at every step, the first included.  An imposed rate (submarine
+melt undercutting a grounded tidewater front, a frontal ablation
+scenario) goes in the same way.
 
 The momentum balance needs no front term: with DG0 geometry the facet
 term ``rho_I g avg(h) jump(s)`` at an ice/no-ice face IS the terminus
@@ -150,15 +148,14 @@ import firedrake as fd
 from firedrake import (
     Constant, Function, FunctionSpace, VectorFunctionSpace, TestFunction,
     TrialFunction, SpatialCoordinate, CellDiameter, FacetNormal, assemble,
-    dx, dS, ds, inner, grad, dot, sqrt, sym, conditional, gt, max_value,
+    dx, dS, ds, inner, grad, dot, sqrt, conditional, gt, max_value,
     min_value, avg, outer, FacetArea, TensorFunctionSpace,
 )
 from firedrake.petsc import PETSc
 
-from .constants import ice_density as RHO_I, water_density as RHO_W
-
-#: Front laws :class:`LevelSet` can move a front by.
-LAWS = ("none", "fixed", "prescribed", "vonmises")
+#: How :class:`LevelSet` can move a front (the calving laws themselves are
+#: rates, in :mod:`icepack_tools.calving`).
+LAWS = ("none", "fixed", "prescribed")
 
 #: Where the level set takes its boundary condition (see the module
 #: docstring): ``advect`` carries ``phi`` and conditions the mesh
@@ -234,7 +231,8 @@ class LevelSet:
         The transport thickness; read for the initial front and for the
         ice/no-ice split of the velocity extrapolation.
     law : str
-        One of :data:`LAWS`.
+        One of :data:`LAWS`: how the front moves.  A calving law runs as
+        ``prescribed``, with its rate passed to :meth:`advance`.
     h_min : float
         Cells with ``h <= h_min`` [m] count as ice-free.
     reinit_every : int
@@ -242,8 +240,6 @@ class LevelSet:
     reinit_sweeps : int
         Fixed-point sweeps of the linearised eikonal equation per
         reinitialisation.
-    sigma_max_grounded, sigma_max_floating : float
-        Von Mises thresholds [MPa].
     phi_init : Function (DG0) or None
         Restart the level set from a checkpointed field instead of the
         thickness outline.
@@ -253,8 +249,7 @@ class LevelSet:
     """
 
     def __init__(self, mesh, h_dg, law="none", h_min=1.0, reinit_every=5,
-                 reinit_sweeps=4, sigma_max_grounded=1.0,
-                 sigma_max_floating=0.15, phi_init=None, drag_mask=None,
+                 reinit_sweeps=4, phi_init=None, drag_mask=None,
                  anchor="advect"):
         if law not in LAWS:
             raise ValueError(f"front law {law!r} not in {LAWS}")
@@ -268,8 +263,6 @@ class LevelSet:
         self.h_min = float(h_min)
         self.reinit_every = int(reinit_every)
         self.reinit_sweeps = max(1, int(reinit_sweeps))
-        self.sigma_max_grounded = float(sigma_max_grounded)
-        self.sigma_max_floating = float(sigma_max_floating)
         self.n_advance = 0
 
         self.Q0 = FunctionSpace(mesh, "DG", 0)
@@ -347,8 +340,6 @@ class LevelSet:
             f"h_min={h_min:g} m"
             + (f", reinit every {self.reinit_every} steps x "
                f"{self.reinit_sweeps} sweeps" if anchor == "advect" else "")
-            + (f", sigma_max grounded/floating = {sigma_max_grounded:g}/"
-               f"{sigma_max_floating:g} MPa" if law == "vonmises" else "")
         )
 
     # ------------------------------------------------------------------
@@ -416,6 +407,11 @@ class LevelSet:
         dist = np.where(np.isfinite(dist), dist, 1e7)
         self.phi.dat.data[:] = np.where(ice[:n_own], -1.0, 1.0) * dist
         self._refresh_extent_fields()
+        # The front normal a law reads is the normal of THIS extent.  The
+        # first call comes from the constructor, before the gradient forms
+        # exist; building them evaluates it.
+        if hasattr(self, "_grad_form"):
+            self._update_unit_gradient()
         return len(seg_a)
 
     def calving_masks(self):
@@ -588,6 +584,10 @@ class LevelSet:
             fd.LinearVariationalProblem(fd.lhs(a_re), fd.rhs(a_re), self.phi),
             solver_parameters=lu)
 
+        # The unit gradient of the initial phi, so a law that reads the front
+        # normal before the first advance reads this front's.
+        self._update_unit_gradient()
+
     def _eikonal_terms(self, phi, psi, weight, n, rhs):
         r"""Cell residual of the upwind eikonal equation in M-matrix form,
         ``sum_q c_q (phi_p - phi_q) = rhs`` with ``c_q = |cos_q|/(wsum |d_pq|)
@@ -733,53 +733,35 @@ class LevelSet:
         num = assemble(chi * TestFunction(self.Q1) * dx)
         self.ice_node.dat.data[:] = np.where(num.dat.data_ro > 0.0, 1.0, 0.0)
 
-    def calving_rate_expr(self, u, h, b, A=None, n=None, rate=None):
-        r"""UFL frontal ablation rate for ``self.law`` on ice (extended
-        into the water afterwards).  ``rate`` is the ``prescribed`` law's
-        input; ``A`` and ``n`` are the ``vonmises`` law's."""
+    def _rate_expr(self, rate):
+        r"""UFL frontal ablation rate on ice (extended into the water
+        afterwards): zero for ``none`` and ``fixed``, ``rate`` for
+        ``prescribed``."""
         if self.law in ("none", "fixed"):
             return Constant(0.0)
-        if self.law == "prescribed":
-            if rate is None:
-                raise ValueError("the 'prescribed' law needs rate=")
-            return rate
-        if A is None or n is None:
-            raise ValueError("the 'vonmises' law needs A= and n=")
-        eps = sym(grad(u))
-        e_xx, e_yy, e_xy = eps[0, 0], eps[1, 1], eps[0, 1]
-        mean = (e_xx + e_yy) / 2
-        rad = sqrt(((e_xx - e_yy) / 2) ** 2 + e_xy ** 2 + Constant(1e-30))
-        e1 = max_value(mean + rad, Constant(0.0))
-        e2 = max_value(mean - rad, Constant(0.0))
-        e_tilde = sqrt((e1 ** 2 + e2 ** 2) / 2 + Constant(1e-30))
-        B = A ** (-1.0 / n)
-        sigma = sqrt(3.0) * B * e_tilde ** (1.0 / n)
-        floating = conditional(
-            gt(Constant(-RHO_W / RHO_I) * b, h), Constant(1.0), Constant(0.0))
-        sigma_max = (floating * Constant(self.sigma_max_floating)
-                     + (1 - floating) * Constant(self.sigma_max_grounded))
-        speed = sqrt(dot(u, u) + Constant(1e-30))
-        return speed * sigma / sigma_max
+        if rate is None:
+            raise ValueError("the 'prescribed' law needs rate=")
+        return rate
 
     # ------------------------------------------------------------------
     # One step
     # ------------------------------------------------------------------
-    def advance(self, dt, u, h, b, A=None, n=None, rate=None):
-        r"""Move the front by ``dt`` with ice velocity ``u`` (CG1) and the
-        ablation rate of ``self.law`` -- ``rate`` for ``prescribed``,
-        the stress state (``A``, ``n``) for ``vonmises``.  Returns the mean
-        ablation rate over front cells [m/yr] as a diagnostic."""
+    def advance(self, dt, u, rate=None):
+        r"""Move the front by ``dt`` with ice velocity ``u`` (CG1) and, for
+        the ``prescribed`` law, the ablation rate ``rate`` [m/yr of normal
+        retreat on ice: a calving law's rate, or an imposed one].  Returns
+        the mean ablation rate over front cells [m/yr] as a diagnostic."""
         self.n_advance += 1
         self.dt = float(dt)
         if self.anchor == "extent":
-            return self._advance_extent(dt, u, h, b, A, n, rate)
+            return self._advance_extent(dt, u, rate)
         if self.law == "fixed":
             self.update_cell_fields()
             return 0.0
         t0 = perf_counter()
-        # Ablation rate on ice as a lumped CG1 field (strain rates are
+        # Ablation rate on ice as a lumped CG1 field (a law's rate is
         # cell-wise, so a low-order rule is exact enough).
-        c_expr = self.calving_rate_expr(u, h, b, A, n, rate)
+        c_expr = self._rate_expr(rate)
         c_num = assemble(c_expr * TestFunction(self.Q1) * dx(degree=2))
         lump = assemble(TestFunction(self.Q1) * dx)
         self.c_rate.dat.data[:] = c_num.dat.data_ro / lump.dat.data_ro
@@ -819,7 +801,7 @@ class LevelSet:
         tot = self.comm.allreduce(float(self.c_cell.dat.data_ro[near].sum()))
         return tot / cnt if cnt else 0.0
 
-    def _advance_extent(self, dt, u, h, b, A=None, n=None, rate=None):
+    def _advance_extent(self, dt, u, rate=None):
         r"""One extent-anchored step: re-solve the eikonal problem at the
         current ice extent, evaluate the rate on ice cells, retreat the
         front by normal flow.  The removal itself is the caller's, through
@@ -829,15 +811,15 @@ class LevelSet:
         if self.law == "fixed":
             self.update_cell_fields()
             return 0.0
-        self.c_cell.interpolate(
-            self.chi * self.calving_rate_expr(u, h, b, A, n, rate))
+        self.c_cell.interpolate(self.chi * self._rate_expr(rate))
         bad = ~np.isfinite(self.c_cell.dat.data_ro)
         if _global_count(bad, self.comm):
             raise FloatingPointError(
                 "level set: non-finite ablation rate on the ice cells")
         t1 = perf_counter()
+        # The unit gradient is already this extent's: the eikonal solve
+        # refreshed it, and phi has not changed since.
         self.phi_old.assign(self.phi)
-        self._update_unit_gradient()
         self.dt_c.assign(dt)
         self._ls_solver.solve()
         self.update_cell_fields()

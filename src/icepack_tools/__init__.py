@@ -19,12 +19,13 @@ viscosity   composite membrane and interlayer closures
 momentum    per-layer momentum balance and full single/multi-layer residuals
 parallel    rank-independent field statistics and control-vector gathers
 levelset    finite-volume level-set calving front for DG0 transport
+calving     calving laws (the rate the front retreats at) and their registry
 """
 
 from . import (constants, geometry, grounding, spaces, friction,  # noqa: F401
-               viscosity, momentum, parallel, levelset)
+               viscosity, momentum, parallel, levelset, calving)
 
 __all__ = [
     "constants", "geometry", "grounding", "spaces", "friction", "viscosity",
-    "momentum", "parallel", "levelset",
+    "momentum", "parallel", "levelset", "calving",
 ]
