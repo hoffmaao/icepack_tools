@@ -226,10 +226,8 @@ def test_prescribed_rate_balances_and_retreats():
 
     # A rate given as a field is honoured where it is given: c = 2U on the
     # lower half of the front and U on the upper half, so the lower half
-    # retreats at U while the upper half holds.  (The rate is lumped onto
-    # CG1 nodes before extension, so it must make sense in the water cells
-    # touching the front too; a field that varies *along* the front is the
-    # meaningful test.)
+    # retreats at U while the upper half holds.  (A field that varies
+    # *along* the front is the meaningful test.)
     ls.initialise_from_thickness()
     ls.update_cell_fields()
     Q1 = FunctionSpace(mesh, "CG", 1)
@@ -243,6 +241,27 @@ def test_prescribed_rate_balances_and_retreats():
     upper = yc > W / 2 + 3 * DX
     assert abs(front_x(ls, lower) - (X0 - U * dt * nsteps)) < 0.35 * DX
     assert abs(front_x(ls, upper) - X0) < 0.35 * DX
+
+
+def test_the_rate_is_read_on_ice_cells_only():
+    r"""The lumped nodal rate an advected front takes as Dirichlet data
+    comes from the ice cells around each node alone.  A rate that is
+    meaningless in the water -- a gated law is zero on grounded ice and
+    ungated in the empty cells beyond the front -- must not leak into the
+    front through the water cells that touch it: with c = U on the ice the
+    front holds whatever the water cells say, and with c = 2U on the ice
+    and nothing in the water it retreats at the full U, not half of it."""
+    mesh, h, ls, u, b = make_case(law="prescribed", reinit_every=4)
+    dt, nsteps = 0.5, 8
+    ice = fd.conditional(h > Constant(ls.h_min), Constant(1.0), Constant(0.0))
+    for c_ice, c_water, motion in ((U, 5 * U, 0.0), (2 * U, 0.0, -U)):
+        ls.initialise_from_thickness()
+        ls.update_cell_fields()
+        rate = ice * Constant(c_ice) + (Constant(1.0) - ice) * Constant(c_water)
+        for _ in range(nsteps):
+            ls.advance(dt, u, rate=rate)
+        expected = X0 + motion * dt * nsteps
+        assert abs(front_x(ls) - expected) < 0.35 * DX, (c_ice, c_water, front_x(ls))
 
 
 def test_extent_anchor_is_the_distance_to_the_ice_extent():
@@ -377,6 +396,8 @@ def main():
          test_reinitialisation_heals_isolated_cells),
         ("prescribed rate balances / retreats / varies",
          test_prescribed_rate_balances_and_retreats),
+        ("the rate is read on ice cells only",
+         test_the_rate_is_read_on_ice_cells_only),
         ("prescribed law refuses to run blind, and no law is built in",
          test_prescribed_law_needs_a_rate),
         ("the front normal is current from construction",
