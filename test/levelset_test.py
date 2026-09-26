@@ -32,6 +32,7 @@ Ported from ``ismip7/tests/test_levelset.py``; 5-8 are new.
 
     python -u levelset_test.py        (or pytest, serial part only)
 """
+import gc
 import os
 import shutil
 import subprocess
@@ -243,9 +244,63 @@ def test_prescribed_rate_balances_and_retreats():
     assert abs(front_x(ls, upper) - X0) < 0.35 * DX
 
 
+def test_reinitialisation_keeps_a_convex_front():
+    r"""A disc of ice 12 km across on 2 km cells, reinitialised twenty
+    times with nothing moving it.  Resetting the front cells to the zero
+    contour of the lumped P1 interpolant shrank every convex front by
+    about ``h^2 kappa`` a time (a vertex mean of a convex distance field
+    over-reads it); the rounded tip of a grounded tongue went back 0.6 km
+    per reinitialisation that way.  The front must stay put."""
+    mesh, h, ls, *_ = make_case(reinit_sweeps=4)
+    xc, yc = along(ls), across(ls)
+    radius, cx, cy = 6e3, X0, W / 2
+    r = np.hypot(xc - cx, yc - cy)
+    h.dat.data[:] = np.where(r < radius, H_ICE, 0.0)
+    ls.initialise_from_thickness()
+
+    def front_radius():
+        phi = ls.phi.dat.data_ro
+        near = np.abs(phi) < DX
+        cnt = ls.comm.allreduce(int(near.sum()))
+        assert cnt, "the disc is gone"
+        return ls.comm.allreduce(float((r[near] - phi[near]).sum())) / cnt
+
+    r0 = front_radius()
+    for _ in range(20):
+        ls.reinitialise()
+    assert abs(front_radius() - r0) < 0.1 * DX, (r0, front_radius())
+
+
+def test_a_gated_band_advances_with_its_ice():
+    r"""A band of ice rows five cells wide under ``c = 0`` between rows
+    retreating at ``c = 2U``: the band is a grounded tongue under a gated
+    law, and must advance at U while its neighbours retreat at U.  A nodal
+    mean of the rate over the ice cells at each vertex, and a harmonic
+    extension that blended the retreating rows' rate into the water ahead
+    of the band, held its front back; the extension carried along the
+    normal and the band's own cell rate do not."""
+    mesh, h, ls, u, b = make_case(law="prescribed", reinit_every=4)
+    yc = fd.SpatialCoordinate(mesh)[1 - AX]
+    band = fd.conditional(abs(yc - W / 2) < 2.5 * DX, Constant(0.0), Constant(1.0))
+    rate = band * Constant(2 * U)
+    dt, nsteps = 0.5, 16
+    for _ in range(nsteps):
+        ls.advance(dt, u, rate=rate)
+        # the ice follows the front, as a transport step would carry it
+        h.dat.data[:] = np.where(ls.phi.dat.data_ro <= 0.0, H_ICE, 0.0)
+    # the tip from its own front cells: the band is only five cells wide,
+    # so cells two back already measure the distance to its sides
+    phi, xc = ls.phi.dat.data_ro, along(ls)
+    tip = (np.abs(across(ls) - W / 2) < 1.0 * DX) & (np.abs(phi) < DX)
+    x_tip = (ls.comm.allreduce(float((xc[tip] - phi[tip]).sum()))
+             / ls.comm.allreduce(int(tip.sum())))
+    expected = X0 + U * dt * nsteps
+    assert abs(x_tip - expected) < 0.3 * DX, (x_tip, expected)
+
+
 def test_the_rate_is_read_on_ice_cells_only():
-    r"""The lumped nodal rate an advected front takes as Dirichlet data
-    comes from the ice cells around each node alone.  A rate that is
+    r"""The rate an advected front reads comes from the ice cells inside
+    it alone.  A rate that is
     meaningless in the water -- a gated law is zero on grounded ice and
     ungated in the empty cells beyond the front -- must not leak into the
     front through the water cells that touch it: with c = U on the ice the
@@ -392,6 +447,8 @@ def main():
          test_free_front_advances_and_eikonal_bc_holds_inflow_edge),
         ("fixed front holds", test_fixed_front_does_not_move),
         ("reinitialisation restores the distance", test_reinitialisation_restores_distance),
+        ("reinitialisation keeps a convex front", test_reinitialisation_keeps_a_convex_front),
+        ("a gated band advances with its ice", test_a_gated_band_advances_with_its_ice),
         ("reinitialisation heals a one-cell pocket and a one-cell island",
          test_reinitialisation_heals_isolated_cells),
         ("prescribed rate balances / retreats / varies",
@@ -417,6 +474,11 @@ def main():
         PETSc.Sys.Print(f"\n{i}. {label}" + (f"  [{size} ranks]" if size > 1 else ""))
         fn()
         PETSc.Sys.Print("   ok")
+        # free each test's PETSc objects together on every rank; left to
+        # the interpreter's exit they were destroyed in a different order
+        # on each and the 3-rank run hung after passing
+        gc.collect()
+        PETSc.garbage_cleanup(fd.COMM_WORLD)
     if size > 1 or os.environ.get("ICEPACK_TOOLS_MPI_CHILD"):
         PETSc.Sys.Print(f"\nPASS on {size} ranks")
         return 0

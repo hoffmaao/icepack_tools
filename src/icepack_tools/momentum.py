@@ -24,8 +24,8 @@ stress in the DG0 case.
 """
 
 from firedrake import (
-    Constant, FacetNormal, avg, dS, dx, grad, inner, jump, max_value, split,
-    sym, TestFunction,
+    Constant, FacetNormal, avg, conditional, dS, dx, exp, grad, gt, inner,
+    jump, max_value, split, sqrt, sym, TestFunction,
 )
 from icepack2 import model as _icepack2_model
 
@@ -69,6 +69,35 @@ def momentum_residual(u, v, M, h, s, H, mesh, *, tau=None, stress_above=None,
     return F
 
 
+def front_cliff_correction(v, H, s, mesh, *, rho_I=ice_density,
+                           rho_W=water_density, g=gravity):
+    r"""What the facet driving stress misses at a grounded marine front.
+
+    On a DG0 geometry the driving stress is ``rho_I g avg(H) jump(s)`` on
+    the facets.  Across a calving front -- ice on one side, an ice-free
+    cell with surface ``s_w`` on the other -- that is a push of
+    ``rho_I g H (s - s_w) / 2`` per unit length, where the depth-integrated
+    front condition asks for ``g (rho_I H^2 - rho_W d^2) / 2``, ``d`` the
+    ice's depth below sea level.  The two agree for floating ice
+    (``rho_W d = rho_I H``) and for a margin on land (``d = 0``); against a
+    grounded cliff in water of depth ``D`` the facet term falls short by
+    ``g D (rho_I H - rho_W D) / 2``, which is zero at flotation and 15 %
+    of the push for 1600 m of ice in 300 m of water.  This adds exactly
+    that difference on the facets between a cell holding ice (``H > 0``)
+    and one holding none, and nothing anywhere else."""
+    nu = FacetNormal(mesh)
+    ice = conditional(gt(H, 0.0), 1.0, 0.0)
+
+    def gap(side, other):
+        d = max_value(H(side) - s(side), 0.0)            # depth below sea level
+        exact = 0.5 * g * (rho_I * H(side) ** 2 - rho_W * d ** 2)
+        facet = 0.5 * rho_I * g * H(side) * (s(side) - s(other))
+        return ice(side) * (1.0 - ice(other)) * (exact - facet)
+
+    return (gap("+", "-") * inner(nu("+"), avg(v))
+            + gap("-", "+") * inner(nu("-"), avg(v))) * dS
+
+
 def calving_terminus(u, v, H, s, outflow_ids, layer_fraction=1.0):
     r"""Ocean back-pressure on an outflow boundary.
 
@@ -92,7 +121,7 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
                   c_w0_floor=0.0, h_visc_floor=0.0, alpha_gl=0.0,
                   u_lim=0.0, k_lim=1e-3, gl_width=10.0,
                   h_jump_floor=H_JUMP_FLOOR,
-                  outflow_ids=None,
+                  outflow_ids=None, subelement=None, exact_front=True,
                   rho_I=ice_density, rho_W=water_density, g=gravity):
     r"""Full dual residual for an ``L``-layer column, ``L >= 1``.
 
@@ -166,6 +195,36 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
         ``nhat_cap`` apply to ``budd`` only; ``c0`` and ``eps_tauc`` to
         ``regularized_coulomb`` only.
 
+    subelement : :class:`icepack_tools.grounding.SubelementGrounding`, optional
+        Integrate the basal friction over the grounded part of each cell
+        only, ISSM's ``SubelementFriction2`` (Seroussi et al., 2014, SEP2),
+        instead of switching a whole cell on its cell-mean height above
+        flotation.  On a fully grounded cell the friction is the unchanged
+        Weertman stress over the whole cell; on a partly grounded one it is
+        the same stress at the degree-2 Gauss points of the grounded part;
+        a floating cell has none.  The basal stress, a single vector per
+        cell, is then applied at the centroid of the grounded part, where
+        ISSM pairs each point's drag with the test function at that point:
+        the difference is second order in the variation of the drag across
+        a cell, and on every other cell it is exactly the usual term.  The
+        caller keeps the quadrature current (``subelement.update``) whenever
+        the geometry changes; it is fixed during a solve, so the Jacobian
+        keeps its structure.
+
+        Exact only where the grounded stress needs nothing but the
+        velocity and the controls: ``law="weertman"``, and ``law="budd"``
+        with ``N_ref=None`` and no floor, whose grounded ``N_hat`` is
+        identically 1.  A law that reads the effective pressure would need
+        it at the points too (``rho_I g haf`` there), which this does not
+        yet do, so those combinations are refused.  The smooth ``He`` of
+        ``gl_width`` plays no part: the grounded part is exact.
+
+    exact_front : bool
+        Make the push on a calving front inside the mesh the exact
+        depth-integrated one (:func:`front_cliff_correction`).  It changes
+        only grounded marine fronts: on floating ice and on land the facet
+        driving stress is already exact.  ``False`` keeps the facet term
+        alone.
     rho_I, rho_W, g : float
         Ice density, seawater density and gravity in icepack2 units
         (MPa, m, yr), defaulting to icepack2's constants.  They enter the
@@ -231,7 +290,7 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
         )
         term += momentum_residual(
             u_l, v_l, M_l, h_l, s, H, mesh,
-            tau=S_l if l == 0 else None,
+            tau=S_l if l == 0 and subelement is None else None,
             stress_above=fields[3 * (l + 1) + 2] if l < num_layers - 1 else None,
             stress_below=S_l if l > 0 else None,
             h_floor=h_visc_floor, rho_I=rho_I, g=g,
@@ -239,19 +298,32 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
         if outflow_ids:
             term += calving_terminus(u_l, v_l, H, s, outflow_ids,
                                      layer_fraction=layer_fractions[l])
+        if exact_front:
+            term += Constant(layer_fractions[l]) * front_cliff_correction(
+                v_l, H, s, mesh, rho_I=rho_I, rho_W=rho_W, g=g)
+        if l == 0 and subelement is not None:
+            # the basal stress acts on the grounded part of its cell
+            term += inner(S_l, subelement.at_centroid(v_l)) * dx
         F = term if F is None else F + term
 
     # basal stress: residual closure for the chosen `law` on layer 0
     u_b = fields[0]
-    tau_b = basal_stress(u_b, C_w0, theta, H, s, b, m_slide, law=law, c0=c0,
-                         u_min=u_min, eps_tauc=eps_tauc, He=He,
-                         gl_width=gl_width, c_w0_floor=c_w0_floor,
-                         N_ref=N_ref, nhat_floor=nhat_floor,
-                         nhat_cap=nhat_cap, rho_I=rho_I, rho_W=rho_W, g=g)
-    if u_lim > 0.0:
-        from .friction import speed_limiter
-        tau_b = tau_b + speed_limiter(u_b, u_lim, k_lim, u_min)
-    F += friction_residual(fields[2], tests[2], u_b, tau_b, u_min=u_min)
+    if subelement is None:
+        tau_b = basal_stress(u_b, C_w0, theta, H, s, b, m_slide, law=law, c0=c0,
+                             u_min=u_min, eps_tauc=eps_tauc, He=He,
+                             gl_width=gl_width, c_w0_floor=c_w0_floor,
+                             N_ref=N_ref, nhat_floor=nhat_floor,
+                             nhat_cap=nhat_cap, rho_I=rho_I, rho_W=rho_W, g=g)
+        if u_lim > 0.0:
+            from .friction import speed_limiter
+            tau_b = tau_b + speed_limiter(u_b, u_lim, k_lim, u_min)
+        F += friction_residual(fields[2], tests[2], u_b, tau_b, u_min=u_min)
+    else:
+        F += _subelement_friction(subelement, fields[2], tests[2], u_b, C_w0,
+                                  theta, m_slide, law=law, N_ref=N_ref,
+                                  nhat_floor=nhat_floor, u_min=u_min,
+                                  c_w0_floor=c_w0_floor, u_lim=u_lim,
+                                  k_lim=k_lim)
 
     # interlayer shear closures
     for l in range(1, num_layers):
@@ -270,3 +342,48 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
 #: case before it was generalised; ``L = 1`` was always the single-layer
 #: model, so the name was misleading rather than the code.
 multilayer_rc_residual = dual_residual
+
+
+def _subelement_friction(sub, tau, sigma, u, C_w0, theta, m_slide, *, law,
+                         N_ref, nhat_floor, u_min, c_w0_floor, u_lim, k_lim):
+    r"""The basal-stress closure integrated over each cell's grounded part.
+
+    ``tau = -(1/|K|) int_{K_g} tau_W(u) u/|u| dx`` on every cell ``K`` with
+    grounded part ``K_g``: the whole cell when it is fully grounded (the
+    ordinary rule), the degree-2 Gauss points of ``K_g`` when it is partly
+    grounded (:class:`icepack_tools.grounding.SubelementGrounding`), and
+    nothing afloat.  ``tau_W = C_w0 exp(theta) |u|^(1/m)``, Weertman with the
+    friction control, unscaled: SEP2 leaves the friction on the grounded
+    part unchanged.  See :func:`dual_residual`, ``subelement``.
+    """
+    if law == "budd":
+        if N_ref is not None or nhat_floor > 0.0:
+            raise NotImplementedError(
+                "subelement friction with law='budd' needs N_ref=None and "
+                "nhat_floor=0: with a reference effective pressure the "
+                "grounded N_hat is not 1 and would have to be evaluated at "
+                "the grounded-part points (rho_I g haf there), which is not "
+                "implemented")
+    elif law != "weertman":
+        raise NotImplementedError(
+            f"subelement friction is exact for 'weertman' and N_ref-free "
+            f"'budd' only, not {law!r}: a law that reads the effective "
+            f"pressure needs it at the grounded-part points")
+
+    def drag(ev):
+        # the Weertman stress times u/|u| with every field at one point
+        u_q = ev(u)
+        u_reg = sqrt(inner(u_q, u_q) + Constant(u_min) ** 2)
+        C = ev(C_w0) if not isinstance(C_w0, Constant) else C_w0
+        if c_w0_floor:
+            C = max_value(C, Constant(c_w0_floor))
+        return C * exp(ev(theta)) * u_reg ** (1.0 / m_slide - 1.0) * u_q
+
+    u_reg = sqrt(inner(u, u) + Constant(u_min) ** 2)
+    F = inner(tau, sigma) * dx
+    F += sub.full * inner(drag(lambda f: f), sigma) * dx
+    F += inner(sub.integrand(drag), sigma) * dx
+    if u_lim > 0.0:
+        from .friction import speed_limiter
+        F += inner(speed_limiter(u, u_lim, k_lim, u_min) * u / u_reg, sigma) * dx
+    return F

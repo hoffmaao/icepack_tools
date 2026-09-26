@@ -70,9 +70,11 @@ idealised MIP, a forced retreat scenario).
   here the boundary cells keep their time-derivative term and the
   condition enters through the face.)
 * Reinitialisation first resets the interface cells (those sharing a face
-  with an opposite-sign cell) to their exact distance from the zero
-  contour of the P1 interpolant, so the front does not move and the
-  anchors carry no distortion, then relaxes all other cells toward the
+  with an opposite-sign cell) by the sub-cell fix
+  ``phi / max(|grad phi|, 1)`` (Russo and Smereka, 2000), so the front
+  does not move and the anchors carry no distortion (an isolated cell
+  instead takes its distance from the zero contour of the P1
+  interpolant; see ``_mark_interface_cells``), then relaxes all other cells toward the
   upwind eikonal equation ``sum_q c_q (phi_p - phi_q) = sign(phi_p)``,
   ``c_q >= 0`` over the neighbours strictly closer to the interface (the
   causality of fast marching), in pseudo-time: an M-matrix system
@@ -80,13 +82,13 @@ idealised MIP, a forced retreat scenario).
   with the stencil and the cosine weights updated in between.  The
   initial condition is the exact geometric signed distance to the
   ice/water facets.
-* The ice velocity is needed beyond the front.  A harmonic extension with
-  the ice-node values as Dirichlet data is used, and the ablation rate is
-  extended the same way, from its area-weighted mean over the ice cells
-  inside the front at each of their vertices and from nowhere else; this
-  plays the role of the constant-along-the-normal extension
-  ``n . grad S = 0`` of Bondzio et al. (2016, Eq. 9), after Zhao et al.
-  (1996).
+* The ice velocity is needed beyond the front: a harmonic extension with
+  the ice-node values as Dirichlet data.  The ablation rate is each ice
+  cell's own mean of the law, read on the ice cells inside the front and
+  nowhere else, and is carried into the water constant along the normal,
+  ``n . grad c = 0`` (Bondzio et al., 2016, Eq. 9, after Zhao et al.,
+  1996), by the reinitialisation's causal upwind stencil.  A front face
+  moves with its ice cell's rate, never the extension's.
 
 Both anchors share every piece of the discretisation below: the
 least-squares cell gradients, the linear-upwind faces, the linearised
@@ -174,6 +176,22 @@ DELTA = 1e-6
 # move a value by up to this many cells toward the distance function.
 REINIT_TAU_CELLS = 4.0
 WSUM_FLOOR = 0.05
+# weight of the tie to zero in the normal extension of the rate: only a row
+# with no upwind neighbour feels it
+EXT_TIE = 1e-4
+# relative tolerance of the velocity's harmonic extension into the water
+EXT_RTOL = 1e-6
+# The level set's advection and reinitialisation sweeps are upwind M-matrices
+# on DG0 cells with a (pseudo-)time mass term, diagonally dominant: Krylov
+# with block ILU.
+LS_SOLVER = {"ksp_type": "gmres", "pc_type": "bjacobi", "sub_pc_type": "ilu",
+             "ksp_rtol": 1e-10, "ksp_atol": 1e-12, "ksp_max_it": 500}
+# The rate's normal extension has no mass term: a water cell whose upwind
+# neighbours lie nearly across its gradient is held by little more than the
+# tie, and GMRES with block ILU diverged on such a row 68 years into
+# CalvingMIP experiment 4.  It is factorised.
+LS_DIRECT = {"ksp_type": "preonly", "pc_type": "lu",
+             "pc_factor_mat_solver_type": "mumps"}
 # Relative singular-value cutoff of the least-squares gradient stencil.
 LSQ_RCOND = 1e-3
 # phi is a distance function, |grad phi| <= 1; the reconstruction gradient is
@@ -314,6 +332,9 @@ class LevelSet:
         self.sgn = Function(self.Q0, name="sign")
         self.chi_fix = Function(self.Q0, name="interface_cell")
         self.c_cell = Function(self.Q0, name="ablation_rate_cell")
+        # the cells whose rate the front reads (ice inside the front),
+        # refreshed by every advect step
+        self.chi_rate = Function(self.Q0, name="ice_cell_inside")
         # Extent anchoring: the ice indicator and the per-cell front length
         # (facets to ice-free neighbours), both refreshed by every
         # :meth:`solve_eikonal_from_extent`.
@@ -324,10 +345,9 @@ class LevelSet:
         self.drag_mask = (drag_mask if drag_mask is not None
                           else Function(self.Q0, name="drag_mask"))
         self.drag_mask.assign(1.0)
-        # Extended (velocity, ablation rate) beyond the front, CG1.
-        self.w_ext = Function(VectorFunctionSpace(mesh, "CG", 1, dim=3),
+        # Extended velocity beyond the front, CG1.
+        self.w_ext = Function(VectorFunctionSpace(mesh, "CG", 1),
                               name="front_extension")
-        self.c_rate = Function(self.Q1, name="ablation_rate")
 
         if phi_init is not None:
             self.phi.assign(phi_init)
@@ -507,7 +527,7 @@ class LevelSet:
                                     + self._up_minus * cos_m ** 2 * psi('-')) * dS
         self._up_count = w_face * (up_p * psi('+') + up_m * psi('-')) * dS
 
-        # (1) Harmonic extension of (u_x, u_y, c) from ice nodes into water.
+        # (1) Harmonic extension of the velocity from ice nodes into water.
         # Only ``advect`` needs it: an extent-anchored front never carries
         # phi into the water, and its rate lives on ice cells alone.
         W = self.w_ext.function_space()
@@ -533,17 +553,31 @@ class LevelSet:
         self._ext_solver = (fd.LinearVariationalSolver(
             fd.LinearVariationalProblem(a_ext, L_ext, self.w_ext),
             solver_parameters={"ksp_type": "cg", "pc_type": "gamg",
-                               "ksp_rtol": 1e-8, "ksp_max_it": 2000})
+                               "ksp_rtol": EXT_RTOL, "ksp_max_it": 2000})
             if self.anchor == "advect" else None)
 
         # (2) Level-set step: inflow-implicit upwind advection with
         # w = u_ext - c ghat on interior cells, linearised eikonal on
         # boundary cells.
         self.dt_c = Constant(1.0)
-        u_e = fd.as_vector((self.w_ext[0], self.w_ext[1]))
+        u_e = self.w_ext
         if self.anchor == "advect":
+            # Face normal speed.  A front face (ice inside on one side
+            # only) moves with the ice side's rate, as the front does in
+            # Bondzio et al. (2016, Eqs. 4-7): the value extended into the
+            # water is a harmonic blend of every ice node around, and
+            # averaging it in handed a grounded front cell (c = 0 under a
+            # gated law) part of a retreating floating neighbour's rate --
+            # the cell ahead of it then took ice the front never reached.
+            # Faces between two ice cells, or two water cells, average.
             w_n = -self.c_cell * self.ghat                  # DG0 vector
-            wn = dot(u_e, n('+')) + dot(avg(w_n), n('+'))   # face normal speed
+            ci = self.chi_rate
+            s_i = ci('+') + ci('-')
+            w_face = conditional(
+                gt(s_i, 0.5),
+                (ci('+') * w_n('+') + ci('-') * w_n('-')) / max_value(s_i, 1.0),
+                avg(w_n))
+            wn = dot(u_e, n('+')) + dot(w_face, n('+'))
         else:
             # Extent anchoring: normal-flow retreat only, and the face rate
             # is the ice-weighted mean of the two cells' rates, so a front
@@ -578,8 +612,7 @@ class LevelSet:
             # the mesh edge.
             eik_b = Constant(0.0) * psi * ds
         a_ls = ((phi - self.phi_old) / self.dt_c * psi * dx + adv + eik_b)
-        lu = {"ksp_type": "preonly", "pc_type": "lu",
-              "pc_factor_mat_solver_type": "mumps"}
+        lu = dict(LS_SOLVER)
         self._ls_solver = fd.LinearVariationalSolver(
             fd.LinearVariationalProblem(fd.lhs(a_ls), fd.rhs(a_ls), self.phi),
             solver_parameters=lu)
@@ -598,6 +631,23 @@ class LevelSet:
         self._reinit_solver = fd.LinearVariationalSolver(
             fd.LinearVariationalProblem(fd.lhs(a_re), fd.rhs(a_re), self.phi),
             solver_parameters=lu)
+
+        # (4) The rate beyond the front, constant along the normal
+        # (``n . grad c = 0``, Bondzio et al., 2016, Eq. 9): each water cell
+        # takes the upwind-weighted mean of its neighbours nearer the front,
+        # through the reinitialisation's own causal stencil, down to the ice
+        # cells, which hold their own rate.  A weak tie to zero keeps a row
+        # with no upwind neighbour determined.
+        if self.anchor == "advect":
+            self.c_own = Function(self.Q0, name="ablation_rate_ice")
+            ci, d2 = self.chi_rate, self.cell_diam ** 2
+            c_t = fd.TrialFunction(self.Q0)
+            a_c = (self._eikonal_terms(c_t, psi, 1 - ci, n, rhs=Constant(0.0))
+                   + ci * (c_t - self.c_own) * psi / d2 * dx
+                   + Constant(EXT_TIE) * (1 - ci) * c_t * psi / d2 * dx)
+            self._rate_ext_solver = fd.LinearVariationalSolver(
+                fd.LinearVariationalProblem(fd.lhs(a_c), fd.rhs(a_c), self.c_cell),
+                solver_parameters=dict(LS_DIRECT))
 
         # The unit gradient of the initial phi, so a law that reads the front
         # normal before the first advance reads this front's.
@@ -673,14 +723,24 @@ class LevelSet:
 
     def _mark_interface_cells(self):
         r"""Cells sharing a face with an opposite-sign cell are the anchors
-        of a reinitialisation: they are reset to their exact signed
-        distance from the zero contour of the lumped P1 interpolant, so the
-        front stays put and the marched field inherits no distortion.
+        of a reinitialisation.  Each is reset from its own value and its
+        own least-squares gradient, ``phi / max(|grad phi|, 1)`` (the
+        sub-cell fix of Russo and Smereka, 2000): the zero crossing stays
+        where the cell's data puts it, a field steepened by advection is
+        brought back to a distance, and a flat one is never stretched.
+        Resetting to the distance from the zero contour of the lumped P1
+        interpolant instead moved every convex front inward by about
+        ``h^2 kappa`` per reinitialisation, since a vertex mean of a convex
+        distance field over-reads it: the rounded tip of a grounded tongue
+        20 km wide on a 5 km mesh went back 0.6 km at each one, sharpened,
+        and lost 9 km in 80 yr while its advection alone was exact.
 
-        The sign comes from the same interpolant, at the cell centroid,
-        not from the cell's own value.  The two disagree only where the
-        cell-wise field carries a feature the interpolant does not: an
-        isolated cell of the opposite sign.  Such a cell makes no zero
+        An isolated cell -- no face neighbour of its own sign -- takes sign
+        and distance from the interpolant instead, the sign read at its
+        centroid.  Deciding by the interpolant's sign alone also caught the
+        cell the front had just crossed at the tip of an advancing convex
+        front, whose small value the vertex means outvote, and threw it
+        back beyond the front.  An isolated cell makes no zero
         contour in the interpolant, so keeping its sign while measuring
         the distance to the interpolant's contour wrote back the distance
         to the nearest real front -- a one-cell pocket of water 6 km inside
@@ -698,6 +758,9 @@ class LevelSet:
         psi = TestFunction(self.Q0)
         cut = assemble((abs(fd.jump(sgn)) * (psi('+') + psi('-'))) * dS)
         fix = cut.dat.data_ro > 0.0
+        # no face neighbour of the same sign: a one-cell pocket or island
+        same = assemble(((1.0 - abs(fd.jump(sgn)) / 2.0) * (psi('+') + psi('-'))) * dS)
+        isolated = same.dat.data_ro < 0.5
         self.chi_fix.dat.data[:] = np.where(fix, 1.0, 0.0)
         # P1 interpolant by mass lumping, then its zero contour.
         q = TestFunction(self.Q1)
@@ -717,10 +780,13 @@ class LevelSet:
         n_own = len(self.phi.dat.data_ro)
         # the interpolant at the centroid: the mean of its vertex values
         sgn_lift = np.where(pc[:n_own].mean(axis=1) > 0.0, 1.0, -1.0)
+        g = self.cell_gradient()
+        gmag = np.maximum(np.sqrt((g * g).sum(axis=1)), 1.0)
         phi_data = self.phi.dat.data
+        own = phi_data / gmag
         if len(seg_a) and fix.any():
             dist = _segment_distance(self.cell_xc[fix], seg_a, seg_b)
-            phi_data[fix] = sgn_lift[fix] * dist
+            phi_data[fix] = np.where(isolated[fix], sgn_lift[fix] * dist, own[fix])
 
     def reinitialise(self):
         r"""Fixed-point sweeps of the linearised eikonal equation away from
@@ -790,41 +856,36 @@ class LevelSet:
         # level-set step uses the same gradient.
         self.phi_old.assign(self.phi)
         self._update_unit_gradient()
-        # Ablation rate on ice as a lumped CG1 field (a law's rate is
-        # cell-wise, so a low-order rule is exact enough), each node the
-        # area-weighted mean of the ICE cells around it alone.  A rate
-        # means nothing in the cells beyond the front: a law gated on the
-        # grounded indicator is ungated there, a stress law reads a dual
-        # state with no ice in it.  Lumping those cells in as well handed
-        # a front node on grounded ice a good fraction of the gated-off
-        # rate, and a cell the front then crossed left the gate for good
-        # -- CalvingMIP experiment 4's front cut across Thule's grounded
-        # ridges that way and lost 17 % of the grounded area where the
-        # ensemble lost 3 %.  The extension's Dirichlet nodes are these
-        # same cells' vertices, so every node it holds has ice data.
+        # The rate is read on the ice cells inside the front alone, each
+        # cell its own mean of the law.  A rate means nothing beyond the
+        # front: a law gated on the grounded indicator is ungated there, a
+        # stress law reads a dual state with no ice in it.  Reading those
+        # cells too handed a front on grounded ice a good fraction of the
+        # gated-off rate (CalvingMIP experiment 4 lost 17 % of its grounded
+        # area where the ensemble lost 3 %), and a nodal mean over the ice
+        # cells around each vertex still handed a grounded cell next to
+        # floating ones a share of theirs.  Beyond the front the rate is
+        # carried along the normal (solver (4)); a harmonic blend put the
+        # floating ice's rate in the water ahead of a grounded tongue, that
+        # water's phi fell behind the tongue's, and every reinitialisation
+        # split the difference.
         chi = self._ice_cell_indicator()
         c_expr = self._rate_expr(rate)
-        v = TestFunction(self.Q1)
-        c_num_f = assemble(chi * c_expr * v * dx(degree=2))
-        lump_f = assemble(chi * v * dx)
-        c_num, lump = c_num_f.dat.data_ro, lump_f.dat.data_ro
-        has_ice = lump > 0.0
-        self.c_rate.dat.data[:] = np.where(
-            has_ice, c_num / np.where(has_ice, lump, 1.0), 0.0)
-        # Extend (u, c) from ice nodes into the water.
+        own = assemble(chi * c_expr * TestFunction(self.Q0) * dx(degree=2))
+        self.c_own.dat.data[:] = own.dat.data_ro / self.cell_area
+        self.chi_rate.assign(chi)
+        # Extend the velocity from the vertices of those cells into the water.
         self._ice_node_indicator(chi)
-        ws = self.w_src.dat.data
-        ws[:, 0] = u.dat.data_ro[:, 0]
-        ws[:, 1] = u.dat.data_ro[:, 1]
-        ws[:, 2] = self.c_rate.dat.data_ro
+        self.w_src.dat.data[:] = u.dat.data_ro
         ice = self.ice_node.dat.data_ro > 0.5
-        bad = ~np.isfinite(ws[ice]).all(axis=1)
+        bad = ~(np.isfinite(self.w_src.dat.data_ro[ice]).all(axis=1)
+                & np.isfinite(self.c_own.dat.data_ro).all())
         if _global_count(bad, self.comm):
             raise FloatingPointError(
-                "level set: non-finite (u, c) on ice nodes; check the "
-                "velocity and the ablation-rate inputs")
+                "level set: non-finite velocity or ablation rate on ice; "
+                "check the velocity and the ablation-rate inputs")
         self._ext_solver.solve()
-        self.c_cell.interpolate(self.w_ext[2])
+        self._rate_ext_solver.solve()
         t1 = perf_counter()
         self.dt_c.assign(dt)
         self._ls_solver.solve()

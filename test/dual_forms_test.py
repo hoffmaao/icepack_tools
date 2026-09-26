@@ -19,6 +19,10 @@ Claims the other icepack repos would rely on:
     not, and Budd's PISM floor is only accepted where it means what it
     says (against a frozen ``N_ref``), where its amplification and its
     grounding-line jump are then pinned.
+  * the push on a calving front inside the mesh is the exact
+    depth-integrated ``g (rho_I H^2 - rho_W d^2) / 2`` for a floating
+    shelf, a grounded marine cliff and a margin on land; the facet driving
+    stress alone gets the first and last and falls short on the cliff.
   * a column that goes genuinely ice-free -- ``H = 0``, as an ocean
     buffer seaward of the calving front is -- still assembles a finite
     multilayer residual, and does so *because* of ``h_jump_floor``:
@@ -39,7 +43,8 @@ from icepack_tools.friction import basal_stress, weertman_anchor, LAWS
 from icepack_tools.grounding import (
     effective_pressure, grounded_mask, height_above_flotation,
 )
-from icepack_tools.momentum import dual_residual
+from icepack_tools.constants import gravity
+from icepack_tools.momentum import dual_residual, front_cliff_correction
 from icepack_tools.spaces import (
     dual_function_space, layer_thicknesses, split_layers,
 )
@@ -429,6 +434,40 @@ def test_budd_nhat_floor():
           f"gt(N, 0) gate alone would have let nhat_cap * tau_W through")
 
 
+def test_front_push_is_exact():
+    r"""Total x-force on a straight front across a strip, from the facet
+    driving stress with and without the cliff correction, against
+    ``W g (rho_I H^2 - rho_W d^2) / 2``.  A uniform test velocity turns
+    the facet terms into the force they apply."""
+    Lx, Ly, nx, X0 = 40e3, 12e3, 20, 20e3
+    mesh = firedrake.RectangleMesh(nx, 6, Lx, Ly)
+    Q = FunctionSpace(mesh, "DG", 0)
+    x = SpatialCoordinate(mesh)
+    v = Function(VectorFunctionSpace(mesh, "CG", 1)).interpolate(as_vector((1.0, 0.0)))
+    nu = firedrake.FacetNormal(mesh)
+    r = rho_I / rho_W
+    print(f"  {'front':<22} {'facet only':>12} {'corrected':>12} {'exact':>12}  MN/m")
+    for name, H0, bed in (("floating shelf", 400.0, -1000.0),
+                          ("grounded marine cliff", 1600.0, -300.0),
+                          ("margin on land", 800.0, 150.0)):
+        H = Function(Q).interpolate(firedrake.conditional(x[0] < X0, H0, 0.0))
+        b = Function(Q).assign(bed)
+        s = Function(Q).interpolate(max_value(b + H, (1.0 - r) * H))
+        facet = firedrake.assemble(
+            rho_I * gravity * firedrake.avg(H)
+            * inner(firedrake.jump(s, nu), firedrake.avg(v)) * firedrake.dS)
+        corr = firedrake.assemble(front_cliff_correction(v, H, s, mesh))
+        d = max(H0 - max(bed + H0, (1.0 - r) * H0), 0.0)
+        exact = Ly * 0.5 * gravity * (rho_I * H0 ** 2 - rho_W * d ** 2)
+        print(f"  {name:<22} {facet / Ly:>12.4f} {(facet + corr) / Ly:>12.4f} "
+              f"{exact / Ly:>12.4f}")
+        assert abs(facet + corr - exact) < 1e-9 * exact, (name, facet + corr, exact)
+        if name == "grounded marine cliff":
+            assert (exact - facet) / exact > 0.1, "the cliff case no longer discriminates"
+        else:
+            assert abs(corr) < 1e-9 * exact, (name, corr)
+
+
 def main():
     print("Generality of the dual residual builder.\n")
 
@@ -494,6 +533,9 @@ def main():
 
     print("\n8. budd's PISM floor only where it means what it says")
     test_budd_nhat_floor()
+
+    print("\n9. the push on a front inside the mesh is exact")
+    test_front_push_is_exact()
 
     print("\nPASS: one builder covers L=1 and L>1 and all three friction laws")
 

@@ -25,6 +25,11 @@ thickness, a bed and a level set; a model can also be its own state.
 ``b``            bed elevation
 ``haf``          height above flotation, ``h - (rho_w / rho_i) max(-b, 0)``
 ``chi_gr``       grounded indicator, ``haf > 0``
+``gr_frac``      optional: the grounded measure in [0, 1] the momentum's
+                 friction sees (a sub-element grounded fraction, or the
+                 friction's smooth indicator).  A law gated on grounded ice
+                 reads it when it is there, so a front cell is exactly as
+                 grounded for calving as for sliding; ``chi_gr`` otherwise
 ``nfront``       outward unit normal of the front (the level set's unit
                  gradient)
 ``A``, ``n``     fluidity and Glen exponent; read only by the strain-rate
@@ -354,7 +359,13 @@ class Law:
         raise NotImplementedError
 
     def gated(self, model, c):
-        return c * (Constant(1.0) - model.chi_gr) if self.grounded_gate else c
+        if not self.grounded_gate:
+            return c
+        # A cell toggling across flotation under the binary indicator
+        # switched the rate between 0 and the floating value from one step
+        # to the next; the friction's own measure is continuous, and is the
+        # one the momentum solve used.
+        return c * (Constant(1.0) - getattr(model, "gr_frac", model.chi_gr))
 
     def fields(self, model):
         return {}
