@@ -70,9 +70,11 @@ idealised MIP, a forced retreat scenario).
   here the boundary cells keep their time-derivative term and the
   condition enters through the face.)
 * Reinitialisation first resets the interface cells (those sharing a face
-  with an opposite-sign cell) to their exact distance from the zero
-  contour of the P1 interpolant, so the front does not move and the
-  anchors carry no distortion, then relaxes all other cells toward the
+  with an opposite-sign cell) by the sub-cell fix
+  ``phi / max(|grad phi|, 1)`` (Russo and Smereka, 2000), so the front
+  does not move and the anchors carry no distortion (an isolated cell
+  instead takes its distance from the zero contour of the P1
+  interpolant; see ``_mark_interface_cells``), then relaxes all other cells toward the
   upwind eikonal equation ``sum_q c_q (phi_p - phi_q) = sign(phi_p)``,
   ``c_q >= 0`` over the neighbours strictly closer to the interface (the
   causality of fast marching), in pseudo-time: an M-matrix system
