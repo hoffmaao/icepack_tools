@@ -24,8 +24,8 @@ stress in the DG0 case.
 """
 
 from firedrake import (
-    Constant, FacetNormal, avg, dS, dx, exp, grad, inner, jump, max_value,
-    split, sqrt, sym, TestFunction,
+    Constant, FacetNormal, avg, conditional, dS, dx, exp, grad, gt, inner,
+    jump, max_value, split, sqrt, sym, TestFunction,
 )
 from icepack2 import model as _icepack2_model
 
@@ -69,6 +69,35 @@ def momentum_residual(u, v, M, h, s, H, mesh, *, tau=None, stress_above=None,
     return F
 
 
+def front_cliff_correction(v, H, s, mesh, *, rho_I=ice_density,
+                           rho_W=water_density, g=gravity):
+    r"""What the facet driving stress misses at a grounded marine front.
+
+    On a DG0 geometry the driving stress is ``rho_I g avg(H) jump(s)`` on
+    the facets.  Across a calving front -- ice on one side, an ice-free
+    cell with surface ``s_w`` on the other -- that is a push of
+    ``rho_I g H (s - s_w) / 2`` per unit length, where the depth-integrated
+    front condition asks for ``g (rho_I H^2 - rho_W d^2) / 2``, ``d`` the
+    ice's depth below sea level.  The two agree for floating ice
+    (``rho_W d = rho_I H``) and for a margin on land (``d = 0``); against a
+    grounded cliff in water of depth ``D`` the facet term falls short by
+    ``g D (rho_I H - rho_W D) / 2``, which is zero at flotation and 15 %
+    of the push for 1600 m of ice in 300 m of water.  This adds exactly
+    that difference on the facets between a cell holding ice (``H > 0``)
+    and one holding none, and nothing anywhere else."""
+    nu = FacetNormal(mesh)
+    ice = conditional(gt(H, 0.0), 1.0, 0.0)
+
+    def gap(side, other):
+        d = max_value(H(side) - s(side), 0.0)            # depth below sea level
+        exact = 0.5 * g * (rho_I * H(side) ** 2 - rho_W * d ** 2)
+        facet = 0.5 * rho_I * g * H(side) * (s(side) - s(other))
+        return ice(side) * (1.0 - ice(other)) * (exact - facet)
+
+    return (gap("+", "-") * inner(nu("+"), avg(v))
+            + gap("-", "+") * inner(nu("-"), avg(v))) * dS
+
+
 def calving_terminus(u, v, H, s, outflow_ids, layer_fraction=1.0):
     r"""Ocean back-pressure on an outflow boundary.
 
@@ -92,7 +121,7 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
                   c_w0_floor=0.0, h_visc_floor=0.0, alpha_gl=0.0,
                   u_lim=0.0, k_lim=1e-3, gl_width=10.0,
                   h_jump_floor=H_JUMP_FLOOR,
-                  outflow_ids=None, subelement=None,
+                  outflow_ids=None, subelement=None, exact_front=True,
                   rho_I=ice_density, rho_W=water_density, g=gravity):
     r"""Full dual residual for an ``L``-layer column, ``L >= 1``.
 
@@ -190,6 +219,12 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
         yet do, so those combinations are refused.  The smooth ``He`` of
         ``gl_width`` plays no part: the grounded part is exact.
 
+    exact_front : bool
+        Make the push on a calving front inside the mesh the exact
+        depth-integrated one (:func:`front_cliff_correction`).  It changes
+        only grounded marine fronts: on floating ice and on land the facet
+        driving stress is already exact.  ``False`` keeps the facet term
+        alone.
     rho_I, rho_W, g : float
         Ice density, seawater density and gravity in icepack2 units
         (MPa, m, yr), defaulting to icepack2's constants.  They enter the
@@ -263,6 +298,9 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
         if outflow_ids:
             term += calving_terminus(u_l, v_l, H, s, outflow_ids,
                                      layer_fraction=layer_fractions[l])
+        if exact_front:
+            term += Constant(layer_fractions[l]) * front_cliff_correction(
+                v_l, H, s, mesh, rho_I=rho_I, rho_W=rho_W, g=g)
         if l == 0 and subelement is not None:
             # the basal stress acts on the grounded part of its cell
             term += inner(S_l, subelement.at_centroid(v_l)) * dx
