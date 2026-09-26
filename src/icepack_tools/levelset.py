@@ -181,10 +181,17 @@ WSUM_FLOOR = 0.05
 EXT_TIE = 1e-4
 # relative tolerance of the velocity's harmonic extension into the water
 EXT_RTOL = 1e-6
-# The level set's own systems -- advection, the rate's normal extension, the
-# reinitialisation sweeps -- are upwind M-matrices on DG0 cells.
+# The level set's advection and reinitialisation sweeps are upwind M-matrices
+# on DG0 cells with a (pseudo-)time mass term, diagonally dominant: Krylov
+# with block ILU.
 LS_SOLVER = {"ksp_type": "gmres", "pc_type": "bjacobi", "sub_pc_type": "ilu",
              "ksp_rtol": 1e-10, "ksp_atol": 1e-12, "ksp_max_it": 500}
+# The rate's normal extension has no mass term: a water cell whose upwind
+# neighbours lie nearly across its gradient is held by little more than the
+# tie, and GMRES with block ILU diverged on such a row 68 years into
+# CalvingMIP experiment 4.  It is factorised.
+LS_DIRECT = {"ksp_type": "preonly", "pc_type": "lu",
+             "pc_factor_mat_solver_type": "mumps"}
 # Relative singular-value cutoff of the least-squares gradient stencil.
 LSQ_RCOND = 1e-3
 # phi is a distance function, |grad phi| <= 1; the reconstruction gradient is
@@ -640,7 +647,7 @@ class LevelSet:
                    + Constant(EXT_TIE) * (1 - ci) * c_t * psi / d2 * dx)
             self._rate_ext_solver = fd.LinearVariationalSolver(
                 fd.LinearVariationalProblem(fd.lhs(a_c), fd.rhs(a_c), self.c_cell),
-                solver_parameters=lu)
+                solver_parameters=dict(LS_DIRECT))
 
         # The unit gradient of the initial phi, so a law that reads the front
         # normal before the first advance reads this front's.
