@@ -73,7 +73,7 @@ idealised MIP, a forced retreat scenario).
   with an opposite-sign cell) to their exact distance from the zero
   contour of the P1 interpolant, keeping their own sign (an isolated cell
   takes the interpolant's sign too; see ``_mark_interface_cells``), so the
-  front does not move and the anchors carry no distortion, then relaxes
+  front stays on that contour and the anchors carry no distortion, then relaxes
   all other cells toward the
   upwind eikonal equation ``sum_q c_q (phi_p - phi_q) = sign(phi_p)``,
   ``c_q >= 0`` over the neighbours strictly closer to the interface (the
@@ -734,13 +734,13 @@ class LevelSet:
         keeps the front the advection left, and the advection's own drift
         with it.  Measured on CalvingMIP experiment 2 (5 km cells, a
         circular front retreating at 100-400 m/yr under radial flow), the
-        contour reset holds the prescribed radius to +2 m/yr, the same as
-        no reset at all corrected by nothing (-5 m/yr) only by luck of
-        sign, while the own-value resets drift -9 to -13 m/yr and put the
-        front 4.7 km short in 500 yr.
+        contour reset holds the prescribed radius to +2 m/yr (no
+        reinitialisation at all drifts -5 m/yr), while the own-value
+        resets drift -9 to -13 m/yr and put the front 4.7 km short in
+        500 yr.
 
         The price is at sharp convex features the interpolant cannot
-        hold: a one-cell-radius disc shrinks about 1.5 % of a cell per
+        hold: a one-cell-radius disc shrinks about 1.7 % of a cell per
         reinitialisation, and the rounded tip of a grounded tongue four
         cells wide between retreating floating ice goes back 4 km in
         80 yr where an own-value reset holds it (the own-value resets
