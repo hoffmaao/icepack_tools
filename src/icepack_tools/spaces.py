@@ -8,7 +8,7 @@ state lives in a mixed space.  For one layer that is
     Z = V x Sigma x T          velocity, membrane stress, basal stress
 
 with ``V`` a CG vector space, ``Sigma`` a symmetric-tensor DG space and
-``T`` a vector DG space -- exactly what the single-layer consumers build
+``T`` a vector DG space (CG with ``stress_family="CG"``) -- exactly what the single-layer consumers build
 by hand (``ismip7/antarctica/scripts/diagnostic_solve.py`` writes
 ``Z = V * Sigma * T``).
 
@@ -23,8 +23,9 @@ interlayer stress on the interface below layer ``l + 1``.  ``L = 1``
 reduces to the single-layer space above with no interlayer unknowns, so
 one residual builder serves both.
 
-Providing this here means a single-layer consumer never has to depend on
-the multilayer package to use the rest of ``icepack_tools``.
+The space itself is built by
+``multilayer.model.utilities.create_function_space``; this wrapper keeps
+the ``icepack_tools`` signature.
 """
 
 import firedrake
