@@ -8,7 +8,7 @@ state lives in a mixed space.  For one layer that is
     Z = V x Sigma x T          velocity, membrane stress, basal stress
 
 with ``V`` a CG vector space, ``Sigma`` a symmetric-tensor DG space and
-``T`` a vector DG space -- exactly what the single-layer consumers build
+``T`` a vector DG space (CG with ``stress_family="CG"``) -- exactly what the single-layer consumers build
 by hand (``ismip7/antarctica/scripts/diagnostic_solve.py`` writes
 ``Z = V * Sigma * T``).
 
@@ -23,14 +23,17 @@ interlayer stress on the interface below layer ``l + 1``.  ``L = 1``
 reduces to the single-layer space above with no interlayer unknowns, so
 one residual builder serves both.
 
-Providing this here means a single-layer consumer never has to depend on
-the multilayer package to use the rest of ``icepack_tools``.
+The space itself is built by
+``multilayer.model.utilities.create_function_space``; this wrapper keeps
+the ``icepack_tools`` signature.
 """
 
 import firedrake
+from multilayer.model.utilities import create_function_space as _create_function_space
 
 
-def dual_function_space(mesh, num_layers=1, degree=1, cell=None):
+def dual_function_space(mesh, num_layers=1, degree=1, cell=None,
+                        stress_family="DG"):
     r"""Mixed space for an ``num_layers``-layer dual model.
 
     Parameters
@@ -46,6 +49,13 @@ def dual_function_space(mesh, num_layers=1, degree=1, cell=None):
         Cell to build the elements on; ``mesh.ufl_cell()`` when omitted.
         Passing the cell object through unchanged is what keeps extruded
         meshes (``TensorProductCell``) working.
+    stress_family : {"DG", "CG"}
+        Where the basal and interlayer stresses live: one value per cell
+        (``"DG"``, the default, icepack2's) or at the vertices with the
+        velocities (``"CG"``, nodal stresses).  See
+        :func:`multilayer.model.utilities.create_function_space`, which
+        builds the space, and :func:`icepack_tools.momentum.dual_residual`
+        for what nodal stresses buy.
 
     Returns
     -------
@@ -53,16 +63,8 @@ def dual_function_space(mesh, num_layers=1, degree=1, cell=None):
     """
     if num_layers < 1:
         raise ValueError(f"num_layers must be >= 1, got {num_layers}")
-    if cell is None:
-        cell = mesh.ufl_cell()
-
-    cg = firedrake.FiniteElement("CG", cell, degree)
-    dg = firedrake.FiniteElement("DG", cell, degree - 1)
-    V = firedrake.VectorFunctionSpace(mesh, cg)
-    Sigma = firedrake.TensorFunctionSpace(mesh, dg, symmetry=True)
-    T = firedrake.VectorFunctionSpace(mesh, dg)
-
-    return firedrake.MixedFunctionSpace([V, Sigma, T] * num_layers)
+    return _create_function_space(mesh, num_layers, degree=degree, cell=cell,
+                                  stress_family=stress_family)
 
 
 #: Tolerance on ``sum(fractions) - 1`` in :func:`layer_thicknesses`.

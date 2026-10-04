@@ -1,31 +1,32 @@
 r"""Momentum balance and full dual residuals, single- and multi-layer.
 
-The per-layer momentum term is written out rather than taken from
-``icepack2.model.variational`` for one reason: the membrane coupling may
-need a thickness floor for coercivity at ice-free nodes, while the
-driving stress must keep the true thickness.  Clamping ``H`` in the
-driving term fabricates a spurious :math:`\rho g H_{\rm floor}\nabla s`
-and blows the buffer velocity up.
+The per-layer momentum balance comes from
+``multilayer.model.variational.momentum_balance``.  This package passes
+the floored thickness in as ``membrane_thickness`` and leaves
+``thickness``, which the driving stress sees, as the true one.  The
+membrane coupling may need a thickness floor for coercivity at ice-free
+nodes, while the driving stress must keep the true thickness: clamping
+``H`` in the driving term fabricates a spurious
+:math:`\rho g H_{\rm floor}\nabla s` and blows the buffer velocity up.
 
-The pair
+Inside multilayer, the pair
 
 .. code::
 
-    -h M : eps(v) + ...  - rho_I g H grad(s) . v   dx
-    rho_I g avg(H) jump(s, nu) . avg(v)            dS
+    -h_membrane M : eps(v) + ...  - rho_I g h grad(s) . v   dx
+    rho_I g avg(h) jump(s, nu) . avg(v)                      dS
 
 is the distributional gradient of a possibly discontinuous surface,
 written as broken cell gradient plus facet jump.  It is correct for a CG1
 *or* a DG0 surface: with CG1 the jump vanishes and the cell term carries
 everything, with DG0 the cell gradient vanishes and the facet term does.
-Do not delete the seemingly dead ``grad(s)`` under DG0 -- that would break
-the CG1 path -- and the facet term is not an add-on but the whole driving
-stress in the DG0 case.
+Neither term is dead: the ``grad(s)`` term carries the CG1 path, and the
+facet term is not an add-on but the whole driving stress in the DG0 case.
 """
 
 from firedrake import (
-    Constant, FacetNormal, avg, conditional, dS, dx, exp, grad, gt, inner,
-    jump, max_value, split, sqrt, sym, TestFunction,
+    Constant, FacetNormal, avg, conditional, dS, dx, exp, gt, inner,
+    max_value, min_value, split, sqrt, TestFunction,
 )
 from icepack2 import model as _icepack2_model
 
@@ -33,19 +34,35 @@ from .constants import ice_density, water_density, gravity
 from .friction import basal_stress, friction_residual
 from .viscosity import (membrane_residual, interlayer_residual,
                         H_JUMP_FLOOR)
+from multilayer.model.variational import momentum_balance as _momentum_balance
+
+#: How :func:`dual_residual` closes an interface between layers.
+INTERFACES = ("below", "series")
+#: From multilayer: whether a stress space is nodal, and the vertex measure
+#: nodal closures are taken in.
+from multilayer.model.utilities import is_nodal, vertex_measure  # noqa: E402
+#: Where :func:`dual_residual` applies ``h_visc_floor``.
+FLOOR_MODES = ("layer", "column")
 
 
 def momentum_residual(u, v, M, h, s, H, mesh, *, tau=None, stress_above=None,
                       stress_below=None, h_floor=0.0, rho_I=ice_density,
-                      g=gravity):
-    r"""One layer's momentum balance, in residual form.
+                      g=gravity, h_membrane=None, stress_measure=dx):
+    r"""One layer's momentum balance, in residual form:
+    :func:`multilayer.model.variational.momentum_balance` with the membrane
+    thickness floored.
 
     ``tau`` is the basal stress (bottom layer only), ``stress_above`` and
     ``stress_below`` the interlayer stresses on the two interfaces.  Signs
     follow ``multilayer.model.variational.momentum_balance``.
 
-    ``H`` is the *total* column thickness, used for the driving stress;
-    ``h`` is this layer's share, used for the membrane coupling.
+    ``h`` is this layer's thickness: the driving stress sees it as it is,
+    the membrane coupling sees it floored at ``h_floor``, or replaced by
+    ``h_membrane`` when that is given (the column-floored thickness of
+    ``dual_residual``).  ``H``, the column thickness, is accepted for
+    compatibility and not used.  ``stress_measure`` is the integral the
+    basal and interlayer stress terms are taken in, the vertex measure for
+    nodal stresses.
 
     There is deliberately no ``layer_fraction`` here, unlike in
     ``calving_terminus``: this layer's share of the driving stress is
@@ -54,19 +71,15 @@ def momentum_residual(u, v, M, h, s, H, mesh, *, tau=None, stress_above=None,
     ``calving_terminus`` does need one, because it goes as the total
     column ``H`` squared and has to be split across layers explicitly.
     """
-    h_v = max_value(h, Constant(h_floor)) if h_floor else h
-    nu = FacetNormal(mesh)
-
-    F = (-h_v * inner(M, sym(grad(v)))
-         - rho_I * g * h * inner(grad(s), v)) * dx
-    F += rho_I * g * avg(h) * inner(jump(s, nu), avg(v)) * dS
-    if tau is not None:
-        F += inner(tau, v) * dx
-    if stress_above is not None:
-        F += inner(stress_above, v) * dx
-    if stress_below is not None:
-        F -= inner(stress_below, v) * dx
-    return F
+    if h_membrane is not None:
+        h_v = h_membrane
+    else:
+        h_v = max_value(h, Constant(h_floor)) if h_floor else h
+    return _momentum_balance(
+        velocity=u, test_function=v, membrane_stress=M, thickness=h,
+        membrane_thickness=h_v, surface=s, basal_stress=tau,
+        stress_above=stress_above, stress_below=stress_below,
+        stress_measure=stress_measure, ice_density=rho_I, gravity=g)
 
 
 def front_cliff_correction(v, H, s, mesh, *, rho_I=ice_density,
@@ -122,7 +135,8 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
                   u_lim=0.0, k_lim=1e-3, gl_width=10.0,
                   h_jump_floor=H_JUMP_FLOOR,
                   outflow_ids=None, subelement=None, exact_front=True,
-                  rho_I=ice_density, rho_W=water_density, g=gravity):
+                  rho_I=ice_density, rho_W=water_density, g=gravity,
+                  interface="below", h_visc_floor_on="layer"):
     r"""Full dual residual for an ``L``-layer column, ``L >= 1``.
 
     **``L = 1`` is the ordinary single-layer icepack2 dual model** -- the
@@ -159,7 +173,9 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
         Layer ``l``'s membrane closure takes ``A_lin_layers[l]``; the
         closure on interface ``l`` takes ``A_lin_layers[l - 1]``, the
         layer *below* the interface, matching the ``A_layers[l - 1]``
-        convention already used there.
+        convention already used there -- and under ``interface="series"``
+        both ``A_lin_layers[l - 1]`` and ``A_lin_layers[l]``, each on its
+        own side.
 
         Per-layer because diffusion creep's prefactor depends on
         temperature and grain size, so a warm basal layer and a cold
@@ -185,9 +201,67 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
         the unguarded division makes the residual NaN.  It floors nothing
         but that denominator: not the driving stress, not the effective
         pressure, not the membrane coupling, which has its own
-        ``h_visc_floor``.  Defaults to
+        ``h_visc_floor``.  Under ``h_visc_floor_on="column"`` it also sets
+        the column thickness below which the column floor's share fades
+        from proportional to equal, so it must be positive there.  Defaults to
         :data:`icepack_tools.viscosity.H_JUMP_FLOOR`; see it for the value
         and for the column thickness at which the floor engages.
+
+    interface : {"below", "series"}
+        Which rheology closes each interface.  ``"below"`` (the default,
+        the multilayer convention this package inherited) reads the whole
+        velocity jump with the law of the layer below.  ``"series"`` puts
+        the two half-layers meeting at the interface in series at the
+        common interface stress, each under its own law
+        (:func:`icepack_tools.viscosity.interlayer_residual`): the closure
+        is the thickness-weighted mean of the two compliances, so a layer
+        that thins to nothing leaves no trace of its rheology.  Two layers
+        of one rheology give the same residual either way.
+    h_visc_floor_on : {"layer", "column"}
+        Where ``h_visc_floor`` acts.  ``"layer"`` (the default) floors each
+        layer's membrane thickness on its own, so an empty layer under
+        thick ice still carries a floor's worth of membrane, in its own
+        rheology.  ``"column"`` floors the column: each layer's membrane
+        thickness is its own plus its share, in proportion to its
+        thickness, of whatever the column falls short of the floor by, so
+        the floor engages only where the column itself is thinner than it
+        and an empty layer never carries any of it.  Where the column is
+        thinner than ``h_jump_floor`` the proportion is undefined and the
+        share fades to an equal one.  For one layer the two are the same.
+
+        Together, ``interface="series"`` and ``h_visc_floor_on="column"``
+        make an empty layer invisible (``test/empty_layer_test.py``): with
+        an empty top layer the solve is exactly the solve without it; an
+        empty bottom layer's rheology does not reach the solution; and
+        with an empty middle layer the solve matches the one without it to
+        discretisation accuracy, since that layer's momentum balance
+        passes the stress through it only in the CG1 projection the
+        balance is tested in -- unless the stresses are **nodal**: built
+        with ``dual_function_space(..., stress_family="CG")``, the basal
+        and interlayer stresses live at the vertices with the velocities
+        and every term they appear in -- their closures and the stress
+        terms of the momentum balance -- is taken in the vertex measure
+        (:func:`multilayer.model.utilities.vertex_measure`), so the whole
+        is still the derivative of one action, an empty layer's balance
+        equates its two interface stresses node by node and the middle
+        case is exact too, and the sliding velocity under an empty bottom
+        layer is determined node by node and converges with the ice
+        velocity as the layer thins.  The membrane stress stays cellwise.
+        Subelement friction needs the cellwise basal stress and refuses
+        the nodal one.
+        An empty bottom layer is not the one-layer model, and should not
+        be: the sliding velocity under the column stays its own unknown,
+        with the ice above's half-layer of shear between it and the layer
+        above.  That sliding velocity has no membrane to couple it across
+        cells, so it is determined through cell means alone and carries
+        cell-scale roughness that any thickness of real ice damps, while
+        the ice velocity above it converges at first order in that
+        thickness: a layer meant to vanish is better floored at a few
+        metres than set to zero.  The front push (``exact_front``, ``outflow_ids``) is still
+        split by ``layer_fractions``, so at a marine front an empty layer
+        takes its share and passes it on through the interface stress: the
+        column's force balance is unchanged, the split between the sliding
+        velocity and the layer above it is not.
 
     law : str
         One of :data:`icepack_tools.friction.LAWS` -- ``regularized_coulomb``
@@ -251,6 +325,14 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
     """
     from .grounding import grounded_mask
 
+    if interface not in INTERFACES:
+        raise ValueError(f"interface must be one of {INTERFACES}, got {interface!r}")
+    if h_visc_floor_on not in FLOOR_MODES:
+        raise ValueError(f"h_visc_floor_on must be one of {FLOOR_MODES}, "
+                         f"got {h_visc_floor_on!r}")
+    if h_visc_floor_on == "column" and h_jump_floor <= 0:
+        raise ValueError("h_visc_floor_on='column' needs a positive "
+                         f"h_jump_floor, got {h_jump_floor!r}")
     num_layers = len(h_layers)
     if layer_fractions is None:
         layer_fractions = [1.0 / num_layers] * num_layers
@@ -274,6 +356,24 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
         )
     tests = split(TestFunction(z.function_space()))
     He = grounded_mask(H, b, gl_width=gl_width, rho_I=rho_I, rho_W=rho_W)
+    nodal = is_nodal(z.function_space().sub(2))
+    closure_dx = vertex_measure(mesh) if nodal else dx
+    if nodal and subelement is not None:
+        raise ValueError("subelement friction needs the cellwise (DG) basal "
+                         "stress; this state carries a nodal (CG) one")
+    if h_visc_floor_on == "column" and h_visc_floor:
+        # The column's shortfall below the floor, shared in proportion to
+        # the layers' thicknesses, so an empty layer takes none of it.  The
+        # proportion is undefined where the column has no thickness to
+        # speak of; below h_jump_floor it fades to an equal share, which is
+        # what keeps the velocity coercive at ice-free nodes.
+        short = max_value(Constant(h_visc_floor) - H, Constant(0.0))
+        thin = Constant(h_jump_floor)
+        equal = (Constant(1.0) - min_value(H, thin) / thin) / num_layers
+        h_mem = [h_l + (h_l / max_value(H, thin) + equal) * short
+                 for h_l in h_layers]
+    else:
+        h_mem = [None] * num_layers      # max(h, floor) per layer, in the closures
 
     F = None
     for l in range(num_layers):
@@ -284,7 +384,7 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
         term = membrane_residual(
             M_l, Mt_l, u_l, h_l, A_layers[l], n_consts[l], n_val=n_vals[l],
             A_lin=A_lin_layers[l], tau_c=tau_c, alpha=alpha, H_ref=H_ref,
-            h_floor=h_visc_floor,
+            h_floor=h_visc_floor, h_membrane=h_mem[l],
             extra_linear=(Constant(alpha_gl) * (Constant(1.0) - He)
                           if alpha_gl > 0 else None),
         )
@@ -293,7 +393,8 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
             tau=S_l if l == 0 and subelement is None else None,
             stress_above=fields[3 * (l + 1) + 2] if l < num_layers - 1 else None,
             stress_below=S_l if l > 0 else None,
-            h_floor=h_visc_floor, rho_I=rho_I, g=g,
+            h_floor=h_visc_floor, rho_I=rho_I, g=g, h_membrane=h_mem[l],
+            stress_measure=closure_dx,
         )
         if outflow_ids:
             term += calving_terminus(u_l, v_l, H, s, outflow_ids,
@@ -317,7 +418,8 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
         if u_lim > 0.0:
             from .friction import speed_limiter
             tau_b = tau_b + speed_limiter(u_b, u_lim, k_lim, u_min)
-        F += friction_residual(fields[2], tests[2], u_b, tau_b, u_min=u_min)
+        F += friction_residual(fields[2], tests[2], u_b, tau_b, u_min=u_min,
+                               measure=closure_dx)
     else:
         F += _subelement_friction(subelement, fields[2], tests[2], u_b, C_w0,
                                   theta, m_slide, law=law, N_ref=N_ref,
@@ -327,13 +429,17 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
 
     # interlayer shear closures
     for l in range(1, num_layers):
+        above = {}
+        if interface == "series":
+            above = dict(A_above=A_layers[l], n_above=n_consts[l],
+                         n_val_above=n_vals[l], A_lin_above=A_lin_layers[l])
         F += interlayer_residual(
             fields[3 * l + 2], tests[3 * l + 2],
             u_above=fields[3 * l], u_below=fields[3 * (l - 1)],
             h_above=h_layers[l], h_below=h_layers[l - 1],
             A=A_layers[l - 1], n=n_consts[l - 1], n_val=n_vals[l - 1],
             A_lin=A_lin_layers[l - 1], tau_c=tau_c, alpha=alpha,
-            h_jump_floor=h_jump_floor,
+            h_jump_floor=h_jump_floor, measure=closure_dx, **above,
         )
     return F
 
