@@ -1,26 +1,27 @@
 r"""Momentum balance and full dual residuals, single- and multi-layer.
 
-The per-layer momentum term is written out rather than taken from
-``icepack2.model.variational`` for one reason: the membrane coupling may
-need a thickness floor for coercivity at ice-free nodes, while the
-driving stress must keep the true thickness.  Clamping ``H`` in the
-driving term fabricates a spurious :math:`\rho g H_{\rm floor}\nabla s`
-and blows the buffer velocity up.
+The per-layer momentum balance comes from
+``multilayer.model.variational.momentum_balance``.  This package passes
+the floored thickness in as ``membrane_thickness`` and leaves
+``thickness``, which the driving stress sees, as the true one.  The
+membrane coupling may need a thickness floor for coercivity at ice-free
+nodes, while the driving stress must keep the true thickness: clamping
+``H`` in the driving term fabricates a spurious
+:math:`\rho g H_{\rm floor}\nabla s` and blows the buffer velocity up.
 
-The pair
+Inside multilayer, the pair
 
 .. code::
 
-    -h M : eps(v) + ...  - rho_I g H grad(s) . v   dx
-    rho_I g avg(H) jump(s, nu) . avg(v)            dS
+    -h_membrane M : eps(v) + ...  - rho_I g h grad(s) . v   dx
+    rho_I g avg(h) jump(s, nu) . avg(v)                      dS
 
 is the distributional gradient of a possibly discontinuous surface,
 written as broken cell gradient plus facet jump.  It is correct for a CG1
 *or* a DG0 surface: with CG1 the jump vanishes and the cell term carries
 everything, with DG0 the cell gradient vanishes and the facet term does.
-Do not delete the seemingly dead ``grad(s)`` under DG0 -- that would break
-the CG1 path -- and the facet term is not an add-on but the whole driving
-stress in the DG0 case.
+Neither term is dead: the ``grad(s)`` term carries the CG1 path, and the
+facet term is not an add-on but the whole driving stress in the DG0 case.
 """
 
 from firedrake import (
@@ -200,7 +201,9 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
         the unguarded division makes the residual NaN.  It floors nothing
         but that denominator: not the driving stress, not the effective
         pressure, not the membrane coupling, which has its own
-        ``h_visc_floor``.  Defaults to
+        ``h_visc_floor``.  Under ``h_visc_floor_on="column"`` it also sets
+        the column thickness below which the column floor's share fades
+        from proportional to equal, so it must be positive there.  Defaults to
         :data:`icepack_tools.viscosity.H_JUMP_FLOOR`; see it for the value
         and for the column thickness at which the floor engages.
 
@@ -327,6 +330,9 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
     if h_visc_floor_on not in FLOOR_MODES:
         raise ValueError(f"h_visc_floor_on must be one of {FLOOR_MODES}, "
                          f"got {h_visc_floor_on!r}")
+    if h_visc_floor_on == "column" and h_jump_floor <= 0:
+        raise ValueError("h_visc_floor_on='column' needs a positive "
+                         f"h_jump_floor, got {h_jump_floor!r}")
     num_layers = len(h_layers)
     if layer_fractions is None:
         layer_fractions = [1.0 / num_layers] * num_layers
