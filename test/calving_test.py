@@ -537,3 +537,29 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def test_eigencalving_is_the_product_of_tensile_principal_strain_rates():
+    mesh = fd.UnitSquareMesh(4, 4)
+    Sig = TensorFunctionSpace(mesh, "DG", 0, symmetry=True)
+    V = VectorFunctionSpace(mesh, "CG", 1)
+    x, y = fd.SpatialCoordinate(mesh)
+    M = Function(Sig)
+    h = _uniform(mesh, 400.0)
+    haf = _uniform(mesh, -50.0)
+    chi_gr = _uniform(mesh, 0.0)
+    law = calving.make("eigencalving", K=2.0e8)
+    # biaxial extension at rates 0.02/yr and 0.01/yr: c = K e1 e2
+    u = Function(V).interpolate(as_vector((0.02 * x, 0.01 * y)))
+    c = cell_values(law.rate(Stub(mesh, u, M, h, haf, chi_gr), 0.0), mesh)
+    assert np.allclose(c, 2.0e8 * 0.02 * 0.01, rtol=1e-9)
+    # one compressive principal rate calves nothing
+    u.interpolate(as_vector((0.02 * x, -0.01 * y)))
+    c = cell_values(law.rate(Stub(mesh, u, M, h, haf, chi_gr), 0.0), mesh)
+    assert np.allclose(c, 0.0, atol=1e-12)
+    # parameters are checked and the registry knows the law
+    assert "eigencalving" in calving.LAWS
+    with pytest.raises(ValueError):
+        calving.make("eigencalving", K=-1.0)
+    with pytest.raises(ValueError):
+        calving.make("eigencalving", kappa=1.0)

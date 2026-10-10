@@ -598,6 +598,30 @@ class HorizontalForceBalance(Law):
                 "calving_rate": self.rate(model, 0.0)}
 
 
+@register
+class Eigencalving(Law):
+    r"""``c = K eps1+ eps2+`` (Levermann et al. 2012, *The Cryosphere* 6,
+    273-286): the product of the tensile principal strain rates [1/yr] at
+    the front times a coefficient ``K`` [m yr].  Published Antarctic values
+    span 2e7 to 3e10 m yr (Wilner et al. 2023, Table 1; Pine Island 3.0e8);
+    the Pine Island calibration against the Greene record gave 1.1e8.
+    Read from the velocity alone, so it needs no stress."""
+    name = "eigencalving"
+    defaults = {"K": 3.0e8}
+
+    def check(self):
+        if not float(self.p["K"]) >= 0.0:
+            raise ValueError(f"eigencalving: K must be non-negative, got {self.p['K']!r}")
+
+    def rate(self, model, t):
+        e1, e2 = principal_values(sym(grad(model.u)))
+        c = Constant(float(self.p["K"])) * max_value(e1, Constant(0.0)) * max_value(e2, Constant(0.0))
+        return self.gated(model, c)
+
+    def fields(self, model):
+        return {"calving_rate": self.rate(model, 0.0)}
+
+
 # ── making a law ─────────────────────────────────────────────────────────
 def _parse_value(val):
     low = val.strip().lower()
