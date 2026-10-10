@@ -622,6 +622,18 @@ class Eigencalving(Law):
         return {"calving_rate": self.rate(model, 0.0)}
 
 
+@register
+class NoCalving(Law):
+    r"""No calving at all: ``c = 0``, the front advances with the ice.  The
+    baseline every rate law has to beat; distinct from :class:`FixedFront`,
+    which pins the front, and from a host's "no law" setting."""
+    name = "nocalving"
+    defaults = {}
+
+    def rate(self, model, t):
+        return Constant(0.0)
+
+
 # ── making a law ─────────────────────────────────────────────────────────
 def _parse_value(val):
     low = val.strip().lower()

@@ -563,3 +563,13 @@ def test_eigencalving_is_the_product_of_tensile_principal_strain_rates():
         calving.make("eigencalving", K=-1.0)
     with pytest.raises(ValueError):
         calving.make("eigencalving", kappa=1.0)
+
+
+def test_nocalving_removes_nothing_and_is_not_the_pinned_front():
+    mesh = fd.UnitSquareMesh(2, 2)
+    V = VectorFunctionSpace(mesh, "CG", 1)
+    u = Function(V).interpolate(as_vector((Constant(300.0), Constant(0.0))))
+    law = calving.make("nocalving")
+    c = cell_values(law.rate(Stub(mesh, u, None, _uniform(mesh, 300.0), _uniform(mesh, -10.0), _uniform(mesh, 0.0)), 0.0), mesh)
+    assert np.allclose(c, 0.0) and law.front_mode == "prescribed"
+    assert calving.make("fixed").front_mode == "fixed"
