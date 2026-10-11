@@ -605,17 +605,31 @@ class Eigencalving(Law):
     the front times a coefficient ``K`` [m yr].  Published Antarctic values
     span 2e7 to 3e10 m yr (Wilner et al. 2023, Table 1; Pine Island 3.0e8);
     the Pine Island calibration against the Greene record gave 1.1e8.
-    Read from the velocity alone, so it needs no stress."""
+    Read from the velocity alone, so it needs no stress.
+
+    The law is Levermann's for ice shelves, so grounded ice does not calve
+    under it. ``ratio_max`` caps the rate at that multiple of the ice speed,
+    as :class:`HorizontalForceBalance` caps its ratio: the strain-rate
+    product is quadratic in the velocity gradient, and on a 2 km Antarctic
+    mesh the shear margins and a front's first cells carry products that
+    put the uncapped rate at millions of metres a year, which emptied the
+    Amery front and an inland outcrop edge in one step (NOTS 2083242). At
+    the cap the front retreats at most ``ratio_max`` cells of ice speed a
+    step; where the product is modest the cap never binds."""
     name = "eigencalving"
-    defaults = {"K": 3.0e8}
+    defaults = {"K": 3.0e8, "ratio_max": 5.0}
+    grounded_gate = True
 
     def check(self):
         if not float(self.p["K"]) >= 0.0:
             raise ValueError(f"eigencalving: K must be non-negative, got {self.p['K']!r}")
+        if not float(self.p["ratio_max"]) > 0.0:
+            raise ValueError(f"eigencalving: ratio_max must be positive, got {self.p['ratio_max']!r}")
 
     def rate(self, model, t):
         e1, e2 = principal_values(sym(grad(model.u)))
         c = Constant(float(self.p["K"])) * max_value(e1, Constant(0.0)) * max_value(e2, Constant(0.0))
+        c = min_value(c, Constant(float(self.p["ratio_max"])) * speed(model.u))
         return self.gated(model, c)
 
     def fields(self, model):
