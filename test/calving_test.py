@@ -395,6 +395,43 @@ def test_thickness_law_calves_marine_fronts_and_spares_land_ones():
     assert np.all(ls2.c_cell.dat.data_ro[at("land")] > 0.0)
 
 
+@pytest.mark.parametrize("name, params", [
+    ("velocity", {}), ("vonmises", {}), ("hfb", {"sigma_max": 0.15}),
+    ("eigencalving", {}), ("thickness", {"hc": HC})])
+def test_every_law_spares_land_fronts_under_the_gate(name, params):
+    r"""``marine_only`` is every law's gate (``Law.gated``): on the margins
+    mesh the gated rate is zero on every cell whose bed is above sea level,
+    the land margin and the ice ringing the nunatak among them, and is the
+    law's own rate on every marine cell, the grounded cliff on a bed below
+    sea level included."""
+    mesh, h, b, u, ls, x, y, band = _margins()
+    Sig = TensorFunctionSpace(mesh, "DG", 0, symmetry=True)
+    # a tensile membrane stress, so the stress laws have something to read
+    M = Function(Sig).interpolate(fd.as_tensor(((0.3, 0.0), (0.0, 0.1))))
+    state = calving.FrontState(u, M, None, h, b, ls)
+    on = calving.make(name, **params, marine_only=True)
+    off = calving.make(name, **params, marine_only=False)
+    c_on = cell_values(on.rate(state, 0.0), mesh)
+    c_off = cell_values(off.rate(state, 0.0), mesh)
+    land = b.dat.data_ro >= 0.0
+    assert land.any() and (~land).any()
+    assert np.all(c_on[land] == 0.0)
+    assert np.allclose(c_on[~land], c_off[~land], rtol=1e-12, atol=0.0)
+    if name != "eigencalving":       # uniform flow strains nothing: no rate anywhere
+        assert np.any(c_off[land] > 0.0), "without the gate the land cells calve"
+    assert "marine_only=True" in on.describe()
+    assert "land-terminating fronts do not calve" in on.describe()
+    assert "land-terminating" not in off.describe()
+
+
+def test_the_land_gate_is_a_switch():
+    assert calving.make("hfb").p["marine_only"] is False
+    assert calving.make("thickness").p["marine_only"] is True
+    assert calving.make("hfb", **calving.parse_params(["marine_only=true"])).p["marine_only"]
+    with pytest.raises(ValueError, match="marine_only"):
+        calving.make("hfb", marine_only="yes")
+
+
 def _slab(anchor="extent"):
     r"""Ice (300 m, afloat on a 1000 m deep bed) fills x < 0.5 of a unit
     square and flows at U along x; open water beyond."""

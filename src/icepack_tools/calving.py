@@ -141,6 +141,23 @@ margins and nunataks thinner than ``Hc`` and book the loss as calving;
 by default it acts only where the bed is below sea level, which still
 calves a marine grounded cliff.
 
+Land-terminating fronts (``marine_only``, every law)
+----------------------------------------------------
+The level set anchors on every ice/no-ice facet, so on an ice sheet any
+law also acts where the ice ends on land: a nunatak, an outcrop, an
+ice-free oasis.  A cliff there does not calve.  It deforms under its own
+weight, the stress imbalance at its face carrying the ice forward, and a
+front that is not calving moves with the ice; what flows on into the sea
+calves there.  ``marine_only=True`` makes that every law's rule: the rate
+is zero where the bed is at or above sea level, so a land margin advances
+with the ice, and a marine front, floating or grounded on a bed below sea
+level, calves under the law.  On BedMachine Antarctica v4.1 the bed test
+spares 98 % of the front that faces ice-free land and keeps 89 % of the
+front that faces the ocean; the rest of that front rests on rock above
+sea level and carries about 3 Gt/yr.  A retreat-only front needs the same
+split, land it may advance onto and sea it may not: the ``sea`` argument
+of :class:`icepack_tools.front_transport.FrontTransport`.
+
 Units: MPa, m, yr (icepack conventions).
 """
 
@@ -328,7 +345,10 @@ class Law:
     Parameters arrive as keyword arguments, are checked against
     ``defaults`` so a typo fails loudly, and are exposed as ``self.p[key]``.
     ``grounded_gate`` zeroes the rate on grounded cells; apply it through
-    :meth:`gated`.
+    :meth:`gated`.  So does ``marine_only``, a parameter every law takes
+    (see the module docstring, *Land-terminating fronts*): off unless a law
+    sets its own default, it zeroes the rate where the bed is at or above
+    sea level.
     """
     name = ""
     #: parameter name -> default value; anything else is refused
@@ -341,11 +361,16 @@ class Law:
     front_mode = "prescribed"
 
     def __init__(self, **params):
-        unknown = set(params) - set(self.defaults)
+        takes = set(self.defaults) | {"marine_only"}
+        unknown = set(params) - takes
         if unknown:
             raise ValueError(f"{self.name}: unknown parameter(s) {sorted(unknown)}; "
-                             f"it takes {sorted(self.defaults)}")
+                             f"it takes {sorted(takes)}")
         self.p = dict(self.defaults, **params)
+        self.p.setdefault("marine_only", False)
+        if not isinstance(self.p["marine_only"], bool):
+            raise ValueError(f"{self.name}: marine_only must be true or false, "
+                             f"got {self.p['marine_only']!r}")
         self.check()
 
     @property
@@ -359,13 +384,15 @@ class Law:
         raise NotImplementedError
 
     def gated(self, model, c):
-        if not self.grounded_gate:
-            return c
-        # A cell toggling across flotation under the binary indicator
-        # switched the rate between 0 and the floating value from one step
-        # to the next; the friction's own measure is continuous, and is the
-        # one the momentum solve used.
-        return c * (Constant(1.0) - getattr(model, "gr_frac", model.chi_gr))
+        if self.grounded_gate:
+            # A cell toggling across flotation under the binary indicator
+            # switched the rate between 0 and the floating value from one
+            # step to the next; the friction's own measure is continuous, and
+            # is the one the momentum solve used.
+            c = c * (Constant(1.0) - getattr(model, "gr_frac", model.chi_gr))
+        if self.p["marine_only"]:
+            c = conditional(lt(model.b, Constant(0.0)), c, Constant(0.0))
+        return c
 
     def fields(self, model):
         return {}
@@ -375,7 +402,9 @@ class Law:
 
     def describe(self):
         p = ", ".join(f"{k}={_format(v)}" for k, v in self.p.items())
-        return f"{self.name}({p})" + (" [grounded ice does not calve]" if self.grounded_gate else "")
+        return (f"{self.name}({p})"
+                + (" [grounded ice does not calve]" if self.grounded_gate else "")
+                + (" [land-terminating fronts do not calve]" if self.p["marine_only"] else ""))
 
 
 @register
@@ -414,9 +443,9 @@ class ThicknessLaw(Law):
 
     ``hc`` [m] is where the front settles; 375 m is the value in the
     CalvingMIP protocol's example results, which the protocol does not fix.
-    ``marine_only`` (default on) confines the rule to cells whose bed is
-    below sea level, so a land margin or the ice ringing a nunatak never
-    calves while a marine grounded cliff still does."""
+    ``marine_only`` (every law's gate, on by default here) confines the
+    rule to cells whose bed is below sea level, so a land margin or the ice
+    ringing a nunatak never calves while a marine grounded cliff still does."""
     name = "thickness"
     defaults = {"hc": 375.0, "marine_only": True}
 
@@ -428,8 +457,6 @@ class ThicknessLaw(Law):
         hc = Constant(float(self.p["hc"]))
         thickness = max_value(model.h, Constant(0.0))
         c = max_value(Constant(1.0) + (hc - thickness) / hc, Constant(0.0)) * speed(model.u)
-        if self.p["marine_only"]:
-            c = conditional(lt(model.b, Constant(0.0)), c, Constant(0.0))
         return self.gated(model, c)
 
     def fields(self, model):
