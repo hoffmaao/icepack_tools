@@ -81,15 +81,10 @@ from firedrake import (
     Function, TestFunction, FacetNormal, assemble, dot, dx, dS, ds, grad,
     inner, max_value, min_value,
 )
-from firedrake.petsc import PETSc
 
 from .geometry import cg1_lift
 
-__all__ = ["FrontTransport", "MAX_FLOOD_SYNC"]
-
-#: Halo exchanges a flood may take to settle across the ranks before it is
-#: reported as stuck (each exchange carries it across one partition boundary).
-MAX_FLOOD_SYNC = 64
+__all__ = ["FrontTransport"]
 
 
 def _global_count(mask, comm):
@@ -233,11 +228,10 @@ class FrontTransport:
             return (lose_p + lose_m) * dS
         return (lose_p * w("+") + lose_m * w("-")) * dS
 
-    def outflow(self, q, w=None):
+    def outflow(self, q):
         r"""Ice the inside cells export across the domain edge, per unit
-        time: a 0-form, or with a DG0 test function each cell's share."""
-        f = self.chi_in * self._un_plus * q
-        return (f * w if w is not None else f) * ds
+        time: a 0-form."""
+        return self.chi_in * self._un_plus * q * ds
 
     # ------------------------------------------------------------------
     # The front, before the solve
@@ -410,7 +404,10 @@ class FrontTransport:
         A connected-component labelling of the region's subgraph on each
         rank, then the outer loop of a sweep across the ranks: mark,
         exchange the halo, take any newly marked ghost cell as a further
-        seed, and repeat until no rank marks anything new.  Collective."""
+        seed, and repeat until no rank marks anything new.  The marked set
+        only grows, so every exchange but the last marks a new cell and the
+        sweep settles within as many exchanges as the region has cells; one
+        that does not raises ``RuntimeError``.  Collective."""
         from scipy.sparse import coo_matrix
         from scipy.sparse.csgraph import connected_components
 
@@ -424,8 +421,8 @@ class FrontTransport:
         n_comp, label = connected_components(graph, directed=False)
         flag = self._flag
         seed = np.asarray(seed, dtype=bool).copy()
-        reached = np.zeros(n, bool)
-        for _ in range(MAX_FLOOD_SYNC):
+        limit = _global_count(region[:n_own], self.comm) + 1
+        for _ in range(limit):
             hit = np.zeros(n_comp, bool)
             hit[label[seed]] = True
             reached = region & hit[label]
@@ -436,8 +433,8 @@ class FrontTransport:
                 break
             seed |= reached
         else:
-            PETSc.Sys.Print(f"    warning: the {what} flood did not settle in "
-                            f"{MAX_FLOOD_SYNC} halo exchanges")
+            raise RuntimeError(f"the {what} flood did not settle in {limit} "
+                               "halo exchanges")
         return reached
 
     def _lakes(self, phi):

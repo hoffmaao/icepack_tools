@@ -17,7 +17,8 @@ rules, the excess hand-back and the iceberg removal.
    thickness.
 2. Held front, ``c = U``: everything that reaches the front calves.
 3. Retreat, ``c = U + 300``: the front retreats at 300 m/yr and the calving
-   flux is ``H (U + 300)``.
+   flux is ``H (U + 300)``; its per-cell form, each exporting cell's
+   share, sums to the total.
 4. A barrier holds a free front at its t = 0 extent: what reaches it
    calves, as under ``c = U``, fast ice or slow, and nothing piles up past
    it; a retreat past the barrier is not held.
@@ -234,6 +235,17 @@ def test_a_retreat_calves_at_the_calving_rate():
     assert abs(resid) < 1e-6 * expect
     assert abs(xf - (FRONT0 - w * DT * STEPS)) <= 0.2 * DX
     assert abs(tot["calving"] / expect - 1.0) < 0.05
+
+
+def test_the_per_cell_calving_sums_to_the_total():
+    m = Strip()
+    m.run(5, Constant(U + 300.0))
+    total = float(assemble(m.ft.calving(m.h)))
+    per_cell = assemble(m.ft.calving(m.h, TestFunction(m.Q0)))
+    summed = m.comm.allreduce(float(per_cell.dat.data_ro.sum()))
+    PETSc.Sys.Print(f"    calving rate {total:.6e} m3/yr, per cell summed {summed:.6e}")
+    assert total > 0.5 * H0 * (U + 300.0) * WIDTH, total
+    assert abs(summed - total) <= 1e-10 * total, (summed, total)
 
 
 def test_a_barrier_holds_an_advance_and_not_a_retreat():
@@ -496,6 +508,8 @@ def main():
         ("a free advance keeps its ice", test_free_advance_keeps_its_ice),
         ("a held front calves what reaches it", test_a_held_front_calves_what_reaches_it),
         ("a retreat calves at the calving rate", test_a_retreat_calves_at_the_calving_rate),
+        ("the per-cell calving sums to the total",
+         test_the_per_cell_calving_sums_to_the_total),
         ("a barrier holds an advance and not a retreat",
          test_a_barrier_holds_an_advance_and_not_a_retreat),
         ("an enclosed pocket of water is filled", test_an_enclosed_pocket_of_water_is_filled),
