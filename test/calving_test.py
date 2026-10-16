@@ -525,20 +525,6 @@ class Eigencalving(calving.Law):
             calving.LAWS.pop("eigencalving_test", None)
 
 
-def main():
-    tests = [(name, fn) for name, fn in globals().items()
-             if name.startswith("test_") and callable(fn)]
-    for i, (name, fn) in enumerate(tests, 1):
-        print(f"\n{i}. {name}")
-        fn()
-        print("   ok")
-    print("\nPASS: calving laws")
-
-
-if __name__ == "__main__":
-    main()
-
-
 def test_eigencalving_is_the_product_of_tensile_principal_strain_rates():
     mesh = fd.UnitSquareMesh(4, 4)
     Sig = TensorFunctionSpace(mesh, "DG", 0, symmetry=True)
@@ -597,3 +583,17 @@ def test_nocalving_removes_nothing_and_is_not_the_pinned_front():
     c = cell_values(law.rate(Stub(mesh, u, None, _uniform(mesh, 300.0), _uniform(mesh, -10.0), _uniform(mesh, 0.0)), 0.0), mesh)
     assert np.allclose(c, 0.0) and law.front_mode == "prescribed"
     assert calving.make("fixed").front_mode == "fixed"
+
+
+def main():
+    tests = [(name, fn) for name, fn in globals().items()
+             if name.startswith("test_") and callable(fn)]
+    for i, (name, fn) in enumerate(tests, 1):
+        print(f"\n{i}. {name}")
+        fn()
+        print("   ok")
+    print("\nPASS: calving laws")
+
+
+if __name__ == "__main__":
+    main()
