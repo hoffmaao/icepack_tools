@@ -555,6 +555,16 @@ def test_eigencalving_is_the_product_of_tensile_principal_strain_rates():
     u = Function(V).interpolate(as_vector((0.02 * x, 0.01 * y)))
     c = cell_values(law.rate(Stub(mesh, u, M, h, haf, chi_gr), 0.0), mesh)
     assert np.allclose(c, 2.0e8 * 0.02 * 0.01, rtol=1e-9)
+    # one compressive principal rate calves nothing
+    u.interpolate(as_vector((0.02 * x, -0.01 * y)))
+    c = cell_values(law.rate(Stub(mesh, u, M, h, haf, chi_gr), 0.0), mesh)
+    assert np.allclose(c, 0.0, atol=1e-12)
+    # parameters are checked and the registry knows the law
+    assert "eigencalving" in calving.LAWS
+    with pytest.raises(ValueError):
+        calving.make("eigencalving", K=-1.0)
+    with pytest.raises(ValueError):
+        calving.make("eigencalving", kappa=1.0)
 
 
 def test_eigencalving_is_capped_at_a_multiple_of_the_speed_and_gated_on_grounded_ice():
@@ -577,16 +587,6 @@ def test_eigencalving_is_capped_at_a_multiple_of_the_speed_and_gated_on_grounded
     assert np.allclose(c_gr, 0.0)
     with pytest.raises(ValueError):
         calving.make("eigencalving", K=2.0e8, ratio_max=0.0)
-    # one compressive principal rate calves nothing
-    u.interpolate(as_vector((0.02 * x, -0.01 * y)))
-    c = cell_values(law.rate(Stub(mesh, u, M, h, haf, chi_gr), 0.0), mesh)
-    assert np.allclose(c, 0.0, atol=1e-12)
-    # parameters are checked and the registry knows the law
-    assert "eigencalving" in calving.LAWS
-    with pytest.raises(ValueError):
-        calving.make("eigencalving", K=-1.0)
-    with pytest.raises(ValueError):
-        calving.make("eigencalving", kappa=1.0)
 
 
 def test_nocalving_removes_nothing_and_is_not_the_pinned_front():
