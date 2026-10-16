@@ -51,6 +51,7 @@ that residual.
 from firedrake import (
     Constant, conditional, eq, inner, tr, sym, grad, dx, max_value,
 )
+from multilayer.model.variational import interlayer_stress_law
 
 #: Cross-over stress for stress-matching the linear regulariser [MPa].
 TAU_C = 0.1
@@ -109,7 +110,7 @@ def second_invariant(M, d=2):
 def membrane_residual(M, Mt, u, h, A, n, *, A_lin=None, n_val=None,
                       tau_c=TAU_C, alpha=ALPHA, H_ref=H_REF, d=2,
                       h_floor=0.0, extra_linear=None,
-                      stress_eps=STRESS_EPS):
+                      stress_eps=STRESS_EPS, h_membrane=None):
     r"""Composite flow law plus strain-rate coupling, in residual form.
 
     Returns the ``M``-block of the dual residual:
@@ -152,13 +153,22 @@ def membrane_residual(M, Mt, u, h, A, n, *, A_lin=None, n_val=None,
         driving stress: clamping ``H`` there fabricates a spurious
         :math:`\rho g H_{\rm floor}\nabla s` and blows the buffer velocity
         up.
+    h_membrane : UFL expression, optional
+        The thickness the membrane coupling uses, in place of
+        ``max(h, h_floor)``: :func:`icepack_tools.momentum.dual_residual`
+        passes the column-floored layer thickness here under
+        ``h_visc_floor_on="column"``.  Like ``h_floor`` it never touches
+        the driving stress.
     extra_linear : UFL expression, optional
         Additional weight on the linear regulariser, e.g. a
         grounding-zone-gated collar ``alpha_gl * (1 - He)`` that damps a
         frictionless shelf without touching the grounded trunk's rheology.
     """
     n_val = float(n) if n_val is None else n_val
-    h_v = max_value(h, Constant(h_floor)) if h_floor else h
+    if h_membrane is not None:
+        h_v = h_membrane
+    else:
+        h_v = max_value(h, Constant(h_floor)) if h_floor else h
 
     M2 = second_invariant(M, d) + Constant(stress_eps)
     Mn = conditional(eq(n, 1), Constant(1.0), M2 ** ((n - 1) / 2))
@@ -178,10 +188,26 @@ def membrane_residual(M, Mt, u, h, A, n, *, A_lin=None, n_val=None,
     return F
 
 
+def linear_compliance(A, n, *, A_lin=None, n_val=None, tau_c=TAU_C, alpha=ALPHA):
+    r"""The :math:`n = 1` part of a shear closure's compliance in this
+    package: the stress-matched linear regulariser
+    :math:`\alpha A \tau_c^{\,n-1}` and, if given, diffusion creep
+    :math:`A_{\rm lin}`, both in parallel with :math:`A|S|^{n-1}`."""
+    n_val = float(n) if n_val is None else n_val
+    linear = Constant(alpha) * A * Constant(tau_c) ** (n_val - 1)
+    if A_lin is not None:
+        linear = linear + A_lin          # diffusion, n = 1, in parallel
+    return linear
+
+
 def interlayer_residual(S, sigma, u_above, u_below, h_above, h_below, A, n,
                         *, A_lin=None, n_val=None, tau_c=TAU_C, alpha=ALPHA,
-                        stress_eps=STRESS_EPS, h_jump_floor=H_JUMP_FLOOR):
-    r"""Interlayer shear closure with the same linear regularisation.
+                        stress_eps=STRESS_EPS, h_jump_floor=H_JUMP_FLOOR,
+                        A_above=None, n_above=None, n_val_above=None,
+                        A_lin_above=None, measure=dx):
+    r"""Interlayer shear closure with the same linear regularisation:
+    :func:`multilayer.model.variational.interlayer_stress_law` with this
+    package's regularised compliance.
 
     The multilayer interlayer stress obeys
 
@@ -199,22 +225,27 @@ def interlayer_residual(S, sigma, u_above, u_below, h_above, h_below, A, n,
     :data:`H_JUMP_FLOOR` for the default and for the column thickness at
     which it engages.
 
-    ``A_lin`` is the optional diffusion-creep (:math:`n = 1`) prefactor,
-    the same mechanism ``membrane_residual`` takes and again distinct from
-    the stress-matched regulariser :math:`A_{\rm reg} = A\tau_c^{n-1}`.
-    ``None`` (the default) leaves it out.
+    With only ``A``, ``n`` (and ``A_lin``) given, that one law -- by
+    convention the layer *below* the interface -- closes the whole jump.
+    Given ``A_above``, ``n_above`` (and ``A_lin_above``) too, the two
+    half-layers are put in series, each under its own law; see the
+    multilayer law for the form.  ``measure`` is the integral the closure
+    is taken in: ``dx`` for a cellwise stress, the vertex measure to
+    collocate a nodal one.
     """
-    n_val = float(n) if n_val is None else n_val
-    S2 = inner(S, S) + Constant(stress_eps)
-    Sn = conditional(eq(n, 1), Constant(1.0), S2 ** ((n - 1) / 2))
-    A_reg = A * Constant(tau_c) ** (n_val - 1)
-    creep = A * Sn + Constant(alpha) * A_reg
-    if A_lin is not None:
-        creep = creep + A_lin          # diffusion, n = 1, in parallel
-    # Guard the velocity-jump normalisation: h_above + h_below is the summed
-    # thickness of the two adjacent layers, so it vanishes with the column
-    # and is exactly 0 at ice-free nodes.  There is no ice to shear there,
-    # so any finite value works; the floor simply keeps the residual finite.
-    du = (u_above - u_below) / max_value(h_above + h_below,
-                                         Constant(h_jump_floor))
-    return inner(creep * S - du, sigma) * dx
+    kw = dict(interlayer_stress=S, test_function=sigma,
+              velocity_above=u_above, velocity_below=u_below,
+              thickness_above=h_above, thickness_below=h_below,
+              flow_law_coefficient=A, flow_law_exponent=n,
+              linear_coefficient=linear_compliance(A, n, A_lin=A_lin, n_val=n_val,
+                                                   tau_c=tau_c, alpha=alpha),
+              stress_regularization=stress_eps, thickness_floor=h_jump_floor,
+              measure=measure)
+    if A_above is not None:
+        if n_above is None:
+            raise ValueError("a series interface needs n_above with A_above")
+        kw.update(flow_law_coefficient_above=A_above, flow_law_exponent_above=n_above,
+                  linear_coefficient_above=linear_compliance(
+                      A_above, n_above, A_lin=A_lin_above, n_val=n_val_above,
+                      tau_c=tau_c, alpha=alpha))
+    return interlayer_stress_law(**kw)

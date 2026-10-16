@@ -310,17 +310,20 @@ def basal_stress(u, C_w0, theta, H, s, b, m_slide, *, law="regularized_coulomb",
     return tau_W * tau_cap / max_value(tau_W + tau_cap, Constant(1e-15))
 
 
-def friction_residual(tau, sigma, u, tau_b, u_min=U_MIN):
-    r"""Close the dual basal stress: :math:`\tau = -\tau_b\,u/|u|_{\rm reg}`.
+def friction_residual(tau, sigma, u, tau_b, u_min=U_MIN, measure=dx):
+    r"""Close the dual basal stress: :math:`\tau = -\tau_b\,u/|u|_{\rm reg}`,
+    :func:`multilayer.model.variational.sliding_law` with this package's
+    traction magnitudes (:func:`basal_stress`).
 
     Linear in ``tau``, so the basal-stress block of the Jacobian is the
     identity -- non-singular at ``tau = 0``, which is what makes a cold
-    start possible.
-
-    The sign follows icepack2: :math:`\tau` opposes the velocity.
+    start possible.  ``measure`` is the integral the closure is taken in:
+    ``dx`` for a cellwise stress, the vertex measure to collocate a nodal
+    one (:func:`multilayer.model.utilities.vertex_measure`).
     """
-    u_reg = sqrt(inner(u, u) + Constant(u_min) ** 2)
-    return inner(tau + tau_b * u / u_reg, sigma) * dx
+    from multilayer.model.variational import sliding_law
+    return sliding_law(basal_stress=tau, velocity=u, traction=tau_b,
+                       speed_floor=u_min, measure=measure, test_function=sigma)
 
 
 def speed_limiter(u, u_lim, k_lim=1e-3, u_min=U_MIN):

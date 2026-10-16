@@ -70,11 +70,11 @@ idealised MIP, a forced retreat scenario).
   here the boundary cells keep their time-derivative term and the
   condition enters through the face.)
 * Reinitialisation first resets the interface cells (those sharing a face
-  with an opposite-sign cell) by the sub-cell fix
-  ``phi / max(|grad phi|, 1)`` (Russo and Smereka, 2000), so the front
-  does not move and the anchors carry no distortion (an isolated cell
-  instead takes its distance from the zero contour of the P1
-  interpolant; see ``_mark_interface_cells``), then relaxes all other cells toward the
+  with an opposite-sign cell) to their exact distance from the zero
+  contour of the P1 interpolant, keeping their own sign (an isolated cell
+  takes the interpolant's sign too; see ``_mark_interface_cells``), so the
+  front stays on that contour and the anchors carry no distortion, then relaxes
+  all other cells toward the
   upwind eikonal equation ``sum_q c_q (phi_p - phi_q) = sign(phi_p)``,
   ``c_q >= 0`` over the neighbours strictly closer to the interface (the
   causality of fast marching), in pseudo-time: an M-matrix system
@@ -723,36 +723,43 @@ class LevelSet:
 
     def _mark_interface_cells(self):
         r"""Cells sharing a face with an opposite-sign cell are the anchors
-        of a reinitialisation.  Each is reset from its own value and its
-        own least-squares gradient, ``phi / max(|grad phi|, 1)`` (the
-        sub-cell fix of Russo and Smereka, 2000): the zero crossing stays
-        where the cell's data puts it, a field steepened by advection is
-        brought back to a distance, and a flat one is never stretched.
-        Resetting to the distance from the zero contour of the lumped P1
-        interpolant instead moved every convex front inward by about
-        ``h^2 kappa`` per reinitialisation, since a vertex mean of a convex
-        distance field over-reads it: the rounded tip of a grounded tongue
-        20 km wide on a 5 km mesh went back 0.6 km at each one, sharpened,
-        and lost 9 km in 80 yr while its advection alone was exact.
+        of a reinitialisation.  Each is reset to its distance from the zero
+        contour of the lumped P1 interpolant, keeping its own sign, so the
+        front stays where the interpolant puts it and the marched field
+        inherits no distortion.  That contour is also the front the
+        consumers see (their sub-cell area fractions come from the same
+        lift), which is the point: a reset that pins each cell to its OWN
+        value -- ``phi / |grad phi|`` (Russo and Smereka, 2000), or the
+        crossing on each centroid segment to an opposite-sign neighbour --
+        keeps the front the advection left, and the advection's own drift
+        with it.  Measured on CalvingMIP experiment 2 (5 km cells, a
+        circular front retreating at 100-400 m/yr under radial flow), the
+        contour reset holds the prescribed radius to +2 m/yr (no
+        reinitialisation at all drifts -5 m/yr), while the own-value
+        resets drift -9 to -13 m/yr and put the front 4.7 km short in
+        500 yr.
 
-        An isolated cell -- no face neighbour of its own sign -- takes sign
-        and distance from the interpolant instead, the sign read at its
-        centroid.  Deciding by the interpolant's sign alone also caught the
-        cell the front had just crossed at the tip of an advancing convex
-        front, whose small value the vertex means outvote, and threw it
-        back beyond the front.  An isolated cell makes no zero
-        contour in the interpolant, so keeping its sign while measuring
-        the distance to the interpolant's contour wrote back the distance
-        to the nearest real front -- a one-cell pocket of water 6 km inside
-        the ice read phi = +6.75 km and was permanent (CalvingMIP
-        experiment 4 on Thule's ridges, where the rate law drives interior
-        floating cells between grounded ones across zero between
-        reinitialisations).  Sign and distance have to come from the same
-        field or a feature one of them cannot represent survives forever.
-        Taking the sign at the centroid of the interpolant is also the
-        cell-wise reading of the "any vertex inside is ice" mask that a
-        nodal level set uses (Bondzio et al., 2016, Sect. 2.3).  Cells the
-        interpolant does not cut keep their sign."""
+        The price is at sharp convex features the interpolant cannot
+        hold: a one-cell-radius disc shrinks about 1.7 % of a cell per
+        reinitialisation, and the rounded tip of a grounded tongue four
+        cells wide between retreating floating ice goes back 4 km in
+        80 yr where an own-value reset holds it (the own-value resets
+        were tried for exactly this and rejected for the drift above).
+
+        An isolated cell -- no face neighbour of its own sign -- takes its
+        sign from the interpolant too, read at its centroid.  Such a cell
+        makes no zero contour in the interpolant, so keeping its sign while
+        measuring the distance to the interpolant's contour wrote back the
+        distance to the nearest real front -- a one-cell pocket of water
+        6 km inside the ice read phi = +6.75 km and was permanent
+        (CalvingMIP experiment 4 on Thule's ridges, where the rate law
+        drives interior floating cells between grounded ones across zero
+        between reinitialisations).  Deciding EVERY cell's sign by the
+        interpolant, as before, also caught the cell the front had just
+        crossed at the tip of an advancing convex front, whose small value
+        the vertex means outvote, and threw it back beyond the front; so
+        the interpolant's sign is used only where the cell's own cannot
+        be right.  Cells the interpolant does not cut keep their sign."""
         sgn = Function(self.Q0)
         sgn.dat.data[:] = np.where(self.phi.dat.data_ro > 0, 1.0, -1.0)
         psi = TestFunction(self.Q0)
@@ -780,13 +787,11 @@ class LevelSet:
         n_own = len(self.phi.dat.data_ro)
         # the interpolant at the centroid: the mean of its vertex values
         sgn_lift = np.where(pc[:n_own].mean(axis=1) > 0.0, 1.0, -1.0)
-        g = self.cell_gradient()
-        gmag = np.maximum(np.sqrt((g * g).sum(axis=1)), 1.0)
         phi_data = self.phi.dat.data
-        own = phi_data / gmag
         if len(seg_a) and fix.any():
             dist = _segment_distance(self.cell_xc[fix], seg_a, seg_b)
-            phi_data[fix] = np.where(isolated[fix], sgn_lift[fix] * dist, own[fix])
+            sign = np.where(isolated[fix], sgn_lift[fix], np.where(phi_data[fix] > 0, 1.0, -1.0))
+            phi_data[fix] = sign * dist
 
     def reinitialise(self):
         r"""Fixed-point sweeps of the linearised eikonal equation away from

@@ -7,6 +7,10 @@ authors = [
 description = "Residual-form building blocks for icepack2 dual ice-flow models"
 license = { text = "GPL-3.0-or-later" }
 requires-python = ">=3.8"
+dependencies = [
+    # Moves to main once the multi-layer feat/series-interface PR merges.
+    "multilayer @ git+https://github.com/hoffmaao/multi-layer@feat/series-interface",
+]
 
 [build-system]
 requires = ["setuptools>=61"]
