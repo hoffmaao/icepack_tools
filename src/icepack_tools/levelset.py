@@ -262,6 +262,14 @@ class LevelSet:
         Cells with ``h <= h_min`` [m] count as ice-free.
     reinit_every : int
         Reinitialise every this many ``advance`` calls (0 = never).
+    reinit_interval : float or None
+        Reinitialise once this much model time [yr] has been advanced since
+        the last reinitialisation, instead of counting calls.  A consumer
+        whose advance step varies, or is small next to the time a front
+        takes to cross a fraction of a cell, needs it: each reinitialisation
+        undoes most of a sub-cell advance (see :meth:`reinitialise`), so a
+        forward that advances at every adaptive substep and reinitialises
+        every fifth call holds its front in place.
     reinit_sweeps : int
         Fixed-point sweeps of the linearised eikonal equation per
         reinitialisation.
@@ -275,7 +283,7 @@ class LevelSet:
 
     def __init__(self, mesh, h_dg, law="none", h_min=1.0, reinit_every=5,
                  reinit_sweeps=4, phi_init=None, drag_mask=None,
-                 anchor="advect"):
+                 anchor="advect", reinit_interval=None):
         if law not in LAWS:
             raise ValueError(f"front law {law!r} not in {LAWS}")
         if anchor not in ANCHORS:
@@ -287,8 +295,14 @@ class LevelSet:
         self.dt = 0.0
         self.h_min = float(h_min)
         self.reinit_every = int(reinit_every)
+        if reinit_interval is not None and not float(reinit_interval) > 0.0:
+            raise ValueError(f"reinit_interval must be positive, got {reinit_interval!r}")
+        self.reinit_interval = None if reinit_interval is None else float(reinit_interval)
         self.reinit_sweeps = max(1, int(reinit_sweeps))
         self.n_advance = 0
+        #: reinitialisations so far, and the model time advanced since the last
+        self.n_reinit = 0
+        self._since_reinit = 0.0
 
         self.Q0 = FunctionSpace(mesh, "DG", 0)
         self.W0 = VectorFunctionSpace(mesh, "DG", 0)
@@ -365,8 +379,10 @@ class LevelSet:
         PETSc.Sys.Print(
             f"  Level-set front (FV, eikonal BC, anchor={anchor}): law={law}, "
             f"h_min={h_min:g} m"
-            + (f", reinit every {self.reinit_every} steps x "
-               f"{self.reinit_sweeps} sweeps" if anchor == "advect" else "")
+            + ((f", reinit every {self.reinit_interval:g} yr x "
+                if self.reinit_interval is not None else
+                f", reinit every {self.reinit_every} steps x ")
+               + f"{self.reinit_sweeps} sweeps" if anchor == "advect" else "")
         )
 
     # ------------------------------------------------------------------
@@ -798,7 +814,17 @@ class LevelSet:
     def reinitialise(self):
         r"""Fixed-point sweeps of the linearised eikonal equation away from
         the interface cells.  Returns the final residual ``max | |G phi| - 1 |``
-        over interior non-interface cells as a diagnostic."""
+        over interior non-interface cells as a diagnostic.
+
+        Each one costs part of the sub-cell motion since the one before, so
+        how often it runs matters when the advances are small.  A free front
+        on a 2 km strip advancing 4 km in 1,000 steps of 0.004 yr reaches
+        51.8 km of 54 reinitialised every fifth step, 20 m of motion between
+        them, and 50.5 km with 5 m between them; reinitialised once a model
+        year it arrives on time (``test/levelset_test.py``).  A consumer
+        advancing at every adaptive substep sets ``reinit_interval``."""
+        self.n_reinit += 1
+        self._since_reinit = 0.0
         self._mark_interface_cells()
         for _ in range(self.reinit_sweeps):
             self.phi_old.assign(self.phi)
@@ -898,10 +924,15 @@ class LevelSet:
         self._ls_solver.solve()
         t2 = perf_counter()
         res = None
-        if self.reinit_every > 0 and self.n_advance % self.reinit_every == 0:
+        self._since_reinit += float(dt)
+        if self.reinit_interval is not None:
+            due = self._since_reinit >= self.reinit_interval * (1.0 - 1e-9)
+        else:
+            due = self.reinit_every > 0 and self.n_advance % self.reinit_every == 0
+        if due:
             res = self.reinitialise()
         self.update_cell_fields()
-        if self.n_advance in (1, max(self.reinit_every, 1)):
+        if self.n_advance == 1 or (due and self.n_reinit == 1):
             PETSc.Sys.Print(
                 f"    level set timing: rate+extension {t1 - t0:.1f}s, "
                 f"advection {t2 - t1:.1f}s, reinit+cells {perf_counter() - t2:.1f}s"

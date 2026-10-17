@@ -10,7 +10,8 @@ upwind transport through :meth:`FrontTransport.divergence`, the front
 rules, the excess hand-back and the iceberg removal.
 
 1. Free advance, ``c = 0``: no ice is booked as calving, and the ice
-   behind the front keeps nearly the upstream thickness.  Zeroing every
+   behind the front keeps nearly the upstream thickness; in small steps it
+   keeps its speed when the level set reinitialises on model time.  Zeroing every
    cell beyond the level set after a plain transport failed both: it
    drained the front cells into the water, booking 28 % of the ice that
    reached the front as calving, and the edge thinned to 0.28 of the exact
@@ -208,6 +209,27 @@ def test_free_advance_keeps_its_ice():
     assert abs(xf - (FRONT0 + U * DT * STEPS)) <= 0.2 * DX
     assert behind[0] > 0.8 and behind[1] > 0.9 and behind[2] > 0.98, behind
 
+
+
+def test_small_steps_keep_the_front_moving_on_model_time():
+    r"""A forward advances the front at every adaptive substep.  Reinitialised
+    every fifth call, a free front in steps of 1/16 yr gets 2.3 km of its
+    5 km in 10 yr; reinitialised every 2.5 model years (CalvingMIP's
+    cadence: 0.5 yr steps, every fifth) it gets all of it, and calves
+    nothing."""
+    m = Strip()
+    m.ls.reinit_interval = 2.5
+    steps, dt = 160, 1.0 / 16
+    tot = dict(calving=0.0)
+    for _ in range(steps):
+        tot["calving"] += m.step(dt, Constant(0.0))["calving"]
+    xf = m.front_x()
+    exact = FRONT0 + U * dt * steps
+    PETSc.Sys.Print(f"    front {xf/1e3:.2f} km (exact {exact/1e3:.2f}) after "
+                    f"{m.ls.n_reinit} reinitialisations; calving {tot['calving']:.1e} m3")
+    assert m.ls.n_reinit == 4
+    assert abs(xf - exact) <= 0.2 * DX
+    assert tot["calving"] < 1e-3 * H0 * U * WIDTH * dt * steps
 
 def test_a_held_front_calves_what_reaches_it():
     m = Strip()
@@ -506,6 +528,8 @@ def test_an_extent_anchor_is_refused():
 def main():
     tests = [
         ("a free advance keeps its ice", test_free_advance_keeps_its_ice),
+        ("small steps keep the front moving on model time",
+         test_small_steps_keep_the_front_moving_on_model_time),
         ("a held front calves what reaches it", test_a_held_front_calves_what_reaches_it),
         ("a retreat calves at the calving rate", test_a_retreat_calves_at_the_calving_rate),
         ("the per-cell calving sums to the total",

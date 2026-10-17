@@ -160,6 +160,34 @@ def test_free_front_advances_and_eikonal_bc_holds_inflow_edge():
     assert np.allclose(phi[inside], (xc - expected)[inside], atol=0.5 * DX)
 
 
+
+def test_reinitialising_on_model_time_keeps_a_front_moving():
+    r"""Every reinitialisation costs part of the sub-cell motion since the
+    one before.  A free front advanced 4 km in 1,000 steps of 0.004 yr
+    reaches 51.8 km of 54 reinitialised every fifth step (20 m of motion
+    between them, a hundredth of a cell) and 50.5 km at a quarter of that
+    step; reinitialised once a model year it keeps its speed whatever the
+    step."""
+    dt, n = 0.004, 1000
+    expected = X0 + U * dt * n
+    mesh, h, ls, u, b = make_case(law="none", reinit_interval=1.0)
+    for _ in range(n):
+        ls.advance(dt, u)
+    assert ls.n_reinit == 4, ls.n_reinit
+    assert abs(front_x(ls) - expected) < 0.25 * DX
+    mesh, h, ls, u, b = make_case(law="none", reinit_every=5)
+    for _ in range(n):
+        ls.advance(dt, u)
+    assert ls.n_reinit == n // 5
+    PETSc.Sys.Print(f"    every fifth step: {ls.n_reinit} reinitialisations, front "
+                    f"{front_x(ls)/1e3:.2f} km of {expected/1e3:.2f}")
+    try:
+        make_case(law="none", reinit_interval=0.0)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("a zero reinit_interval was accepted")
+
 def test_fixed_front_does_not_move():
     mesh, h, ls, u, b = make_case(law="fixed")
     for _ in range(5):
@@ -454,6 +482,8 @@ def main():
         ("signed-distance initialisation", test_initialisation_is_signed_distance),
         ("free front advances, eikonal BC at the inflow edge",
          test_free_front_advances_and_eikonal_bc_holds_inflow_edge),
+        ("reinitialising on model time keeps a front moving",
+         test_reinitialising_on_model_time_keeps_a_front_moving),
         ("fixed front holds", test_fixed_front_does_not_move),
         ("reinitialisation restores the distance", test_reinitialisation_restores_distance),
         ("reinitialisation keeps a convex front", test_reinitialisation_keeps_a_convex_front),
