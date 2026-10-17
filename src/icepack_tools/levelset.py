@@ -38,7 +38,9 @@ exactly the mass ``c h L dt`` a front retreating at ``c`` sheds.  Use
 ``extent`` where the thickness is the authority on where ice is (an ice
 sheet with melt and a buffered ocean); use ``advect`` where the front
 must be tracked at sub-cell accuracy through a prescribed motion (an
-idealised MIP, a forced retreat scenario).
+idealised MIP, a forced retreat scenario).  An advected front needs a
+thickness transport that moves the ice with it, and the removal rules that
+go with it: :class:`icepack_tools.front_transport.FrontTransport`.
 * The front moves by the advective + normal-flow level-set equation
   ``phi_t + u . grad(phi) - c |grad(phi)| = 0`` (ice velocity ``u``,
   frontal ablation rate ``c`` as a normal shrinking speed).  The
