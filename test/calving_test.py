@@ -525,6 +525,66 @@ class Eigencalving(calving.Law):
             calving.LAWS.pop("eigencalving_test", None)
 
 
+def test_eigencalving_is_the_product_of_tensile_principal_strain_rates():
+    mesh = fd.UnitSquareMesh(4, 4)
+    Sig = TensorFunctionSpace(mesh, "DG", 0, symmetry=True)
+    V = VectorFunctionSpace(mesh, "CG", 1)
+    x, y = fd.SpatialCoordinate(mesh)
+    M = Function(Sig)
+    h = _uniform(mesh, 400.0)
+    haf = _uniform(mesh, -50.0)
+    chi_gr = _uniform(mesh, 0.0)
+    # the cap is a multiple of the ice speed, which is tiny on the unit
+    # square, so lift it to read the product itself
+    law = calving.make("eigencalving", K=2.0e8, ratio_max=1.0e30)
+    # biaxial extension at rates 0.02/yr and 0.01/yr: c = K e1 e2
+    u = Function(V).interpolate(as_vector((0.02 * x, 0.01 * y)))
+    c = cell_values(law.rate(Stub(mesh, u, M, h, haf, chi_gr), 0.0), mesh)
+    assert np.allclose(c, 2.0e8 * 0.02 * 0.01, rtol=1e-9)
+    # one compressive principal rate calves nothing
+    u.interpolate(as_vector((0.02 * x, -0.01 * y)))
+    c = cell_values(law.rate(Stub(mesh, u, M, h, haf, chi_gr), 0.0), mesh)
+    assert np.allclose(c, 0.0, atol=1e-12)
+    # parameters are checked and the registry knows the law
+    assert "eigencalving" in calving.LAWS
+    with pytest.raises(ValueError):
+        calving.make("eigencalving", K=-1.0)
+    with pytest.raises(ValueError):
+        calving.make("eigencalving", kappa=1.0)
+
+
+def test_eigencalving_is_capped_at_a_multiple_of_the_speed_and_gated_on_grounded_ice():
+    mesh = fd.UnitSquareMesh(4, 4)
+    Sig = TensorFunctionSpace(mesh, "DG", 0, symmetry=True)
+    V = VectorFunctionSpace(mesh, "CG", 1)
+    x, y = fd.SpatialCoordinate(mesh)
+    M = Function(Sig)
+    h = _uniform(mesh, 400.0)
+    haf = _uniform(mesh, -50.0)
+    u = Function(V).interpolate(as_vector((0.02 * x, 0.01 * y)))
+    speed = cell_values(fd.sqrt(fd.dot(u, u)), mesh)
+    law = calving.make("eigencalving", K=2.0e8, ratio_max=5.0)
+    c = cell_values(law.rate(Stub(mesh, u, M, h, haf, _uniform(mesh, 0.0)), 0.0), mesh)
+    # the product (40,000 m/yr) is far above five times the speed, so the cap binds
+    assert np.allclose(c, 5.0 * speed, rtol=1e-6)
+    # Levermann's law is for shelves: grounded ice does not calve under it
+    assert law.grounded_gate
+    c_gr = cell_values(law.rate(Stub(mesh, u, M, h, haf, _uniform(mesh, 1.0)), 0.0), mesh)
+    assert np.allclose(c_gr, 0.0)
+    with pytest.raises(ValueError):
+        calving.make("eigencalving", K=2.0e8, ratio_max=0.0)
+
+
+def test_nocalving_removes_nothing_and_is_not_the_pinned_front():
+    mesh = fd.UnitSquareMesh(2, 2)
+    V = VectorFunctionSpace(mesh, "CG", 1)
+    u = Function(V).interpolate(as_vector((Constant(300.0), Constant(0.0))))
+    law = calving.make("nocalving")
+    c = cell_values(law.rate(Stub(mesh, u, None, _uniform(mesh, 300.0), _uniform(mesh, -10.0), _uniform(mesh, 0.0)), 0.0), mesh)
+    assert np.allclose(c, 0.0) and law.front_mode == "prescribed"
+    assert calving.make("fixed").front_mode == "fixed"
+
+
 def main():
     tests = [(name, fn) for name, fn in globals().items()
              if name.startswith("test_") and callable(fn)]
