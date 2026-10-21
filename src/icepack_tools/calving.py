@@ -404,12 +404,17 @@ class Law:
         p = ", ".join(f"{k}={_format(v)}" for k, v in self.p.items())
         return (f"{self.name}({p})"
                 + (" [grounded ice does not calve]" if self.grounded_gate else "")
-                + (" [land-terminating fronts do not calve]" if self.p["marine_only"] else ""))
+                + (" [land-terminating fronts do not calve]"
+                   if self.p["marine_only"] and self.front_mode != "fixed" else ""))
 
 
 @register
 class FixedFront(Law):
-    r"""The front is frozen at its initial position: no calving, no advance."""
+    r"""The front is frozen at its initial position: no calving, no advance.
+
+    ``marine_only`` is accepted for uniformity with the other laws and has
+    no effect: a held front never moves, on land or at sea.
+    """
     name = "fixed"
     front_mode = "fixed"
 

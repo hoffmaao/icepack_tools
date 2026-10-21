@@ -432,6 +432,13 @@ def test_the_land_gate_is_a_switch():
         calving.make("hfb", marine_only="yes")
 
 
+def test_the_fixed_front_does_not_claim_the_land_gate():
+    held = calving.make("fixed", marine_only=True)
+    assert held.p["marine_only"] is True
+    assert "marine_only=True" in held.describe()
+    assert "land-terminating" not in held.describe()
+
+
 def _slab(anchor="extent"):
     r"""Ice (300 m, afloat on a 1000 m deep bed) fills x < 0.5 of a unit
     square and flows at U along x; open water beyond."""
