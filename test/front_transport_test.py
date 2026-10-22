@@ -22,7 +22,8 @@ rules, the excess hand-back and the iceberg removal.
    share, sums to the total.
 4. A barrier holds a free front at its t = 0 extent: what reaches it
    calves, as under ``c = U``, fast ice or slow, and nothing piles up past
-   it; a retreat past the barrier is not held.
+   it; a retreat past the barrier is not held.  Held only on the sea, it
+   lets the half of the front that ends on land move on with the ice.
 5. A pocket of open water the level set encloses in the ice (one cell
    60 km inside the front) is filled back into the ice, and no ice piles
    up in it or calves into it: under a free front, under a held one (the
@@ -83,7 +84,7 @@ class Strip:
     shelf here stands for one fed across its upstream edge."""
 
     def __init__(self, u=U, barrier=False, land=None, h_init=None, kill_icebergs=False,
-                 law="prescribed", pocket=None):
+                 law="prescribed", pocket=None, sea=None):
         mesh = fd.RectangleMesh(int(LENGTH / DX), int(WIDTH / DX), LENGTH, WIDTH)
         self.mesh, self.comm = mesh, mesh.comm
         Q0 = self.Q0 = FunctionSpace(mesh, "DG", 0)
@@ -114,7 +115,8 @@ class Strip:
                          else np.zeros(len(self.area), bool))
         self.kill_icebergs = kill_icebergs
         self.ft = FrontTransport(self.ls, self.u, barrier=barrier,
-                                 phi0=self.ls.phi.copy(deepcopy=True))
+                                 phi0=self.ls.phi.copy(deepcopy=True),
+                                 sea=None if sea is None else sea(self.xc))
         self.h_old = Function(Q0)
         self.src = Function(Q0)
         self.dt_c = Constant(1.0)
@@ -296,6 +298,34 @@ def test_a_barrier_holds_an_advance_and_not_a_retreat():
                     f"{(FRONT0 - w*DT*STEPS)/1e3:.1f})")
     assert abs(resid) < 1e-6 * flux
     assert abs(xf - (FRONT0 - w * DT * STEPS)) <= 0.2 * DX
+
+
+def test_a_barrier_on_the_sea_lets_a_land_margin_advance():
+    r"""A retreat-only front held only on the sea: half the strip ends on
+    land, half in the sea, and nothing calves the ice (``c = 0``).  In the
+    sea the front holds at the barrier and what reaches it calves, as a held
+    front's does.  On land it moves on with the ice: two cells or more from
+    the sea it keeps the free front's position row by row; nearer, the level
+    set rounds the corner between the held front and the free one."""
+    half = WIDTH / 2
+    m = Strip(barrier=True, sea=lambda xc: xc[:, 1] > half)
+    tot, resid = m.run(STEPS, Constant(0.0))
+    free = Strip()
+    free.run(STEPS, Constant(0.0))
+    far = m.xc[:, 1] < half - 2 * DX
+    sea_rows = m.xc[:, 1] > half
+    x_far, x_free, x_sea = m.front_x(far), free.front_x(far), m.front_x(sea_rows)
+    x_land = m.front_x(m.xc[:, 1] < half)
+    reach = H0 * U * half * DT * STEPS
+    PETSc.Sys.Print(f"    land margin {x_far/1e3:.1f} km two cells from the sea "
+                    f"(free front {x_free/1e3:.1f}), {x_land/1e3:.1f} over the land half; "
+                    f"sea front {x_sea/1e3:.1f} km (barrier {FRONT0/1e3:.1f}); "
+                    f"calving {tot['calving']/reach:.3f} of what reached the sea")
+    assert abs(resid) < 1e-6 * reach
+    assert abs(x_far - x_free) <= 0.2 * DX
+    assert x_land - FRONT0 > 0.5 * U * DT * STEPS
+    assert abs(x_sea - FRONT0) <= 0.2 * DX
+    assert abs(tot["calving"] / reach - 1.0) < 0.05
 
 
 def test_an_enclosed_pocket_of_water_is_filled():
@@ -536,6 +566,8 @@ def main():
          test_the_per_cell_calving_sums_to_the_total),
         ("a barrier holds an advance and not a retreat",
          test_a_barrier_holds_an_advance_and_not_a_retreat),
+        ("a barrier on the sea lets a land margin advance",
+         test_a_barrier_on_the_sea_lets_a_land_margin_advance),
         ("an enclosed pocket of water is filled", test_an_enclosed_pocket_of_water_is_filled),
         ("a grounded tongue holds and piles nothing ahead",
          test_a_grounded_tongue_holds_and_piles_nothing_ahead),

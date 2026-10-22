@@ -50,6 +50,9 @@ every project with an advected front runs the same one.
   (:meth:`FrontTransport.icebergs`).
 * Optionally a **barrier**: the front may advance no further than a given
   extent ``phi0``.  That is the retreat-only front of most ISMIP6 models.
+  Given the cells of ``sea`` it holds only there: a land-terminating front
+  moves on with the ice, and what it carries into the sea past the barrier
+  calves.
 
 Every removal is a volume the caller books, so the mass budget closes to
 the linear solver's tolerance.
@@ -111,9 +114,17 @@ class FrontTransport:
         ``phi0``.  A consumer restarting from a saved level set passes the
         t = 0 distance, because the construction-time field of a restarted
         run is the restart's front.
+    sea : array of bool or None
+        Where the barrier holds, one entry per owned cell: the cells whose
+        bed is below sea level.  A land-terminating front does not calve;
+        it moves with the ice, so the barrier lets it advance over land,
+        and land ice that flows on into a cell of sea past the barrier
+        calves there (see ``icepack_tools.calving``, *Land-terminating
+        fronts*).  ``None`` holds the barrier everywhere.  The ``fixed``
+        law holds its whole front either way.
     """
 
-    def __init__(self, level_set, u, barrier=False, phi0=None):
+    def __init__(self, level_set, u, barrier=False, phi0=None, sea=None):
         if level_set.anchor != "advect":
             raise ValueError(
                 "FrontTransport couples the transport to an advected front "
@@ -124,6 +135,14 @@ class FrontTransport:
         self.u = u
         self.barrier = bool(barrier)
         self.phi0 = phi0 if phi0 is not None else ls.phi0
+        n_own = len(ls.phi.dat.data_ro)
+        if sea is None:
+            self.sea = np.ones(n_own, dtype=bool)
+        else:
+            self.sea = np.asarray(sea, dtype=bool)
+            if self.sea.shape != (n_own,):
+                raise ValueError(f"sea names {self.sea.shape} cells; the level set "
+                                 f"owns {n_own}")
         Q0, W0 = ls.Q0, ls.W0
         self.chi_in = Function(Q0, name="inside_front")
         self.c_vec = Function(W0, name="calving_velocity")
@@ -165,7 +184,8 @@ class FrontTransport:
             lake = self._lakes(self.phi0)
             if _global_count(lake, self.comm):
                 self.phi0.dat.data[lake] = -0.5 * ls.cell_diam.dat.data_ro[lake]
-            self.barred.dat.data[:] = np.where(self.phi0.dat.data_ro > 0.0, 1.0, 0.0)
+            self.barred.dat.data[:] = np.where(
+                (self.phi0.dat.data_ro > 0.0) & self.sea, 1.0, 0.0)
         self.refresh()
 
     # ------------------------------------------------------------------
@@ -272,10 +292,12 @@ class FrontTransport:
         self.c_vec.interpolate(ls.c_cell * self.nfront)
         self.held.assign(0.0)
         if self.barrier:
+            # held where the advance would carry the front past the barrier,
+            # on the sea; over land the front moves on with the ice
             phi, phi0 = ls.phi.dat.data, self.phi0.dat.data_ro
-            hold = phi0 >= phi
+            hold = (phi0 >= phi) & self.sea
             self.held.dat.data[hold] = 1.0
-            np.maximum(phi, phi0, out=phi)
+            phi[hold] = phi0[hold]
             ls.update_cell_fields()
         self.n_filled = self.fill_enclosed_water()
         self.refresh()
