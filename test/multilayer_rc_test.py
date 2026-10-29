@@ -110,8 +110,8 @@ def solve_case(A_lin_layers, ramp):
     mixed state and the geometry the diagnostics below need.
     """
     mesh, Q, V, H, b, s, u_obs, Lx = build()
-    from multilayer.model.utilities import create_function_space, layer_thicknesses
-    Z = create_function_space(mesh, len(FRACTIONS))
+    from icepack_tools.spaces import dual_function_space, layer_thicknesses
+    Z = dual_function_space(mesh, len(FRACTIONS))
     h_layers = layer_thicknesses(H, len(FRACTIONS), fractions=FRACTIONS)
     C_w0 = weertman_anchor(H, s, u_obs, M_SLIDE, Q)
 

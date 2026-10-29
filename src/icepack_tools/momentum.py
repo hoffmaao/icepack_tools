@@ -1,15 +1,15 @@
 r"""Momentum balance and full dual residuals, single- and multi-layer.
 
-The per-layer momentum balance comes from
-``multilayer.model.variational.momentum_balance``.  This package passes
-the floored thickness in as ``membrane_thickness`` and leaves
+The per-layer momentum balance is :func:`momentum_balance`.
+:func:`momentum_residual` passes the floored thickness in as
+``membrane_thickness`` and leaves
 ``thickness``, which the driving stress sees, as the true one.  The
 membrane coupling may need a thickness floor for coercivity at ice-free
 nodes, while the driving stress must keep the true thickness: clamping
 ``H`` in the driving term fabricates a spurious
 :math:`\rho g H_{\rm floor}\nabla s` and blows the buffer velocity up.
 
-Inside multilayer, the pair
+Inside :func:`momentum_balance`, the pair
 
 .. code::
 
@@ -24,9 +24,10 @@ Neither term is dead: the ``grad(s)`` term carries the CG1 path, and the
 facet term is not an add-on but the whole driving stress in the DG0 case.
 """
 
+import ufl
 from firedrake import (
-    Constant, FacetNormal, avg, conditional, dS, dx, exp, gt, inner,
-    max_value, min_value, split, sqrt, TestFunction,
+    Constant, FacetNormal, avg, conditional, dS, dx, exp, grad, gt, inner,
+    jump, max_value, min_value, split, sqrt, sym, TestFunction,
 )
 from icepack2 import model as _icepack2_model
 
@@ -34,27 +35,86 @@ from .constants import ice_density, water_density, gravity
 from .friction import basal_stress, friction_residual
 from .viscosity import (membrane_residual, interlayer_residual,
                         H_JUMP_FLOOR)
-from multilayer.model.variational import momentum_balance as _momentum_balance
+from .spaces import _test, is_nodal, vertex_measure
 
 #: How :func:`dual_residual` closes an interface between layers.
 INTERFACES = ("below", "series")
-#: From multilayer: whether a stress space is nodal, and the vertex measure
-#: nodal closures are taken in.
-from multilayer.model.utilities import is_nodal, vertex_measure  # noqa: E402
 #: Where :func:`dual_residual` applies ``h_visc_floor``.
 FLOOR_MODES = ("layer", "column")
+
+
+def momentum_balance(**kwargs):
+    r"""Return one layer's momentum balance, in the keyword form of
+    icepack2's variational functions
+
+    .. math::
+        -h^l M^l : \varepsilon(v) + \tau \cdot v
+        + S_{\mathrm{above}} \cdot v - S_{\mathrm{below}} \cdot v
+        - \rho_I g\, h^l \nabla s \cdot v = 0
+
+    Parameters
+    ----------
+    membrane_stress, velocity, thickness, surface : per-layer fields
+    basal_stress : icepack2-convention basal drag (bottom layer only)
+    stress_above : interlayer stress from the layer above, or ``None``
+    stress_below : interlayer stress from the layer below, or ``None``
+    membrane_thickness : optional
+        The thickness the membrane coupling uses when it is not the
+        layer's own -- a floored one that keeps the velocity coercive
+        where the ice runs out.  The driving stress always sees the true
+        thickness.
+    stress_measure : optional
+        The integral the basal and interlayer stress terms are taken in:
+        ``dx`` by default, the vertex measure for nodal stresses, so that
+        the balance and the closures are the derivative of one action.
+    ice_density, gravity : optional
+        Defaults to icepack2's constants.
+    test_function : optional
+        Supplied by a caller that holds the test functions itself.
+    """
+    M = kwargs["membrane_stress"]
+    h = kwargs["thickness"]
+    h_m = kwargs.get("membrane_thickness")
+    if h_m is None:
+        h_m = h
+    s = kwargs["surface"]
+    u = kwargs["velocity"]
+    v = _test(u, kwargs)
+    rho = kwargs.get("ice_density", ice_density)
+    g = kwargs.get("gravity", gravity)
+    dxs = kwargs.get("stress_measure", dx)
+
+    tau = kwargs.get("basal_stress")
+    S_above = kwargs.get("stress_above")
+    S_below = kwargs.get("stress_below")
+
+    eps = sym(grad(v))
+    F = (-h_m * inner(M, eps) - rho * g * h * inner(grad(s), v)) * dx
+
+    if tau is not None:
+        F += inner(tau, v) * dxs
+
+    if S_above is not None:
+        F += inner(S_above, v) * dxs
+    if S_below is not None:
+        F -= inner(S_below, v) * dxs
+
+    mesh = ufl.domain.extract_unique_domain(v)
+    nu = FacetNormal(mesh)
+    F += rho * g * avg(h) * inner(jump(s, nu), avg(v)) * dS
+
+    return F
 
 
 def momentum_residual(u, v, M, h, s, H, mesh, *, tau=None, stress_above=None,
                       stress_below=None, h_floor=0.0, rho_I=ice_density,
                       g=gravity, h_membrane=None, stress_measure=dx):
     r"""One layer's momentum balance, in residual form:
-    :func:`multilayer.model.variational.momentum_balance` with the membrane
-    thickness floored.
+    :func:`momentum_balance` with the membrane thickness floored.
 
     ``tau`` is the basal stress (bottom layer only), ``stress_above`` and
     ``stress_below`` the interlayer stresses on the two interfaces.  Signs
-    follow ``multilayer.model.variational.momentum_balance``.
+    follow :func:`momentum_balance`.
 
     ``h`` is this layer's thickness: the driving stress sees it as it is,
     the membrane coupling sees it floored at ``h_floor``, or replaced by
@@ -75,7 +135,7 @@ def momentum_residual(u, v, M, h, s, H, mesh, *, tau=None, stress_above=None,
         h_v = h_membrane
     else:
         h_v = max_value(h, Constant(h_floor)) if h_floor else h
-    return _momentum_balance(
+    return momentum_balance(
         velocity=u, test_function=v, membrane_stress=M, thickness=h,
         membrane_thickness=h_v, surface=s, basal_stress=tau,
         stress_above=stress_above, stress_below=stress_below,
@@ -241,7 +301,7 @@ def dual_residual(z, theta, phi, *, H, s, b, h_layers, C_w0,
         and interlayer stresses live at the vertices with the velocities
         and every term they appear in -- their closures and the stress
         terms of the momentum balance -- is taken in the vertex measure
-        (:func:`multilayer.model.utilities.vertex_measure`), so the whole
+        (:func:`icepack_tools.spaces.vertex_measure`), so the whole
         is still the derivative of one action, an empty layer's balance
         equates its two interface stresses node by node and the middle
         case is exact too, and the sliding velocity under an empty bottom

@@ -23,13 +23,16 @@ interlayer stress on the interface below layer ``l + 1``.  ``L = 1``
 reduces to the single-layer space above with no interlayer unknowns, so
 one residual builder serves both.
 
-The space itself is built by
-``multilayer.model.utilities.create_function_space``; this wrapper keeps
-the ``icepack_tools`` signature.
+The basal and interlayer stresses live one value per cell by default
+(DG), or at the vertices with the velocities (CG, **nodal stresses**),
+whose closures are collocated there with :func:`vertex_measure`.
 """
 
 import firedrake
-from multilayer.model.utilities import create_function_space as _create_function_space
+from icepack2.model.utilities import get_test_function
+
+#: Where the basal and interlayer stresses may live.
+STRESS_FAMILIES = ("DG", "CG")
 
 
 def dual_function_space(mesh, num_layers=1, degree=1, cell=None,
@@ -50,12 +53,17 @@ def dual_function_space(mesh, num_layers=1, degree=1, cell=None,
         Passing the cell object through unchanged is what keeps extruded
         meshes (``TensorProductCell``) working.
     stress_family : {"DG", "CG"}
-        Where the basal and interlayer stresses live: one value per cell
-        (``"DG"``, the default, icepack2's) or at the vertices with the
-        velocities (``"CG"``, nodal stresses).  See
-        :func:`multilayer.model.utilities.create_function_space`, which
-        builds the space, and :func:`icepack_tools.momentum.dual_residual`
-        for what nodal stresses buy.
+        Where the basal and interlayer stresses live.  ``"DG"`` (the
+        default, icepack2's) is one value per cell, closed on the cell
+        means of the velocities.  ``"CG"`` puts them at the vertices with
+        the velocities, degree 1 (so ``degree`` must be 1), for closures
+        collocated there with :func:`vertex_measure`: **nodal stresses**.
+        With them an empty layer's momentum balance equates its two
+        interface stresses node by node rather than in projection, so a
+        layer of zero thickness drops out of the solution exactly, and the
+        sliding velocity under an empty bottom layer is determined node by
+        node.  The membrane stress stays cellwise either way.  See
+        :func:`icepack_tools.momentum.dual_residual`.
 
     Returns
     -------
@@ -63,8 +71,60 @@ def dual_function_space(mesh, num_layers=1, degree=1, cell=None,
     """
     if num_layers < 1:
         raise ValueError(f"num_layers must be >= 1, got {num_layers}")
-    return _create_function_space(mesh, num_layers, degree=degree, cell=cell,
-                                  stress_family=stress_family)
+    if stress_family not in STRESS_FAMILIES:
+        raise ValueError(f"stress_family must be one of {STRESS_FAMILIES}, "
+                         f"got {stress_family!r}")
+    if stress_family == "CG" and degree != 1:
+        raise ValueError("nodal stresses need degree 1: they are closed with "
+                         "vertex quadrature, under which higher-degree basis "
+                         "functions vanish at every quadrature point")
+    if cell is None:
+        cell = mesh.ufl_cell()
+    cg = firedrake.FiniteElement("CG", cell, degree)
+    dg = firedrake.FiniteElement("DG", cell, degree - 1)
+    V = firedrake.VectorFunctionSpace(mesh, cg)
+    Sigma = firedrake.TensorFunctionSpace(mesh, dg, symmetry=True)
+    T = firedrake.VectorFunctionSpace(mesh, cg if stress_family == "CG" else dg)
+    return firedrake.MixedFunctionSpace([V, Sigma, T] * num_layers)
+
+
+def stress_family(space):
+    r"""The element family of a (vector) stress space: ``"Lagrange"`` for
+    nodal stresses, ``"Discontinuous Lagrange"`` for cellwise ones."""
+    elem = space.ufl_element()
+    fam = elem.family()
+    if fam == "Mixed":                     # a vector element that hides its scalar
+        sub = elem.sub_elements
+        fam = (sub() if callable(sub) else sub)[0].family()
+    return fam
+
+
+def is_nodal(space):
+    r"""Does this stress space put its values at the vertices?"""
+    return stress_family(space) in ("Lagrange", "Q")
+
+
+def vertex_measure(mesh):
+    r"""``dx`` with vertex quadrature on triangles.
+
+    A term integrated with it against a continuous test function is
+    collocated at the vertices (the lumped mass), so a closure taken in it
+    holds node by node: :math:`\tau_i = -\tau_b(u_i)`,
+    :math:`c(S_i)\,S_i = (u^{l}_i - u^{l-1}_i)/h_i`.  Nodal stresses
+    (:func:`dual_function_space` with ``stress_family="CG"``) take every
+    basal and interlayer stress term in this measure -- the closures and
+    the stress terms of the momentum balance alike -- so the whole thing
+    is still the derivative of one action.
+    """
+    from finat.point_set import PointSet
+    from finat.quadrature import QuadratureRule
+    name = mesh.ufl_cell().cellname
+    if (name() if callable(name) else name) != "triangle":
+        raise NotImplementedError(
+            "nodal stresses: the vertex quadrature rule is set up for triangles")
+    rule = QuadratureRule(PointSet([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]),
+                          [1.0 / 6.0] * 3)
+    return firedrake.dx(scheme=rule)
 
 
 #: Tolerance on ``sum(fractions) - 1`` in :func:`layer_thicknesses`.
@@ -99,7 +159,7 @@ def split_layers(z, num_layers):
     ``S`` is the stress on the interface *below* that layer, so
     ``layers[0]["interlayer_stress"]`` is the basal stress.  That key is
     the canonical one on every layer -- matching
-    ``multilayer.model.utilities.split_fields``, so a consumer migrating
+    multilayer's ``split_fields``, so a consumer migrating
     off that helper indexes ``layers[l]["interlayer_stress"]`` uniformly
     across layers.  Layer 0 additionally carries ``"basal_stress"``
     pointing at the *same* unknown, purely as a readable alias; the two
@@ -122,3 +182,11 @@ def split_layers(z, num_layers):
             layer["basal_stress"] = layer["interlayer_stress"]
         layers.append(layer)
     return layers
+
+
+def _test(field, kwargs):
+    """The test function paired with ``field``: the caller's
+    (``kwargs["test_function"]``), or the one of the mixed space ``field``
+    was split from."""
+    sigma = kwargs.get("test_function")
+    return get_test_function(field) if sigma is None else sigma

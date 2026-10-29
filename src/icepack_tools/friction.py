@@ -55,6 +55,7 @@ from ufl.differentiation import Grad
 
 from .constants import ice_density, water_density, gravity
 from .geometry import cg1_lift, surface_slope
+from .spaces import _test
 from .grounding import effective_pressure, grounded_mask, height_above_flotation, GL_WIDTH
 
 #: Coulomb-cap coefficient, :math:`\tau_{\rm cap} = c_0 N` (Tsai, Schoof).
@@ -310,18 +311,52 @@ def basal_stress(u, C_w0, theta, H, s, b, m_slide, *, law="regularized_coulomb",
     return tau_W * tau_cap / max_value(tau_W + tau_cap, Constant(1e-15))
 
 
+def sliding_law(**kwargs):
+    r"""Close the basal stress on a sliding relation given as a traction
+    magnitude, in the keyword form of icepack2's variational functions:
+    :math:`\tau = -\tau_b(u)\,u / |u|_{\rm reg}`, with
+    :math:`|u|_{\rm reg} = \sqrt{|u|^2 + u_{\min}^2}`.
+
+    Linear in :math:`\tau`, so the basal-stress block of the Jacobian is
+    the identity, non-singular at :math:`\tau = 0`.  Any law written as a
+    magnitude of the sliding velocity (Weertman, Budd, regularised
+    Coulomb) closes this way.  The sign follows icepack2: :math:`\tau`
+    opposes the velocity.
+
+    Parameters
+    ----------
+    basal_stress, velocity : UFL split variables
+    traction : UFL expression
+        :math:`\tau_b(u) \ge 0` in MPa.
+    speed_floor : float, optional
+        :math:`u_{\min}` in m/yr (default 1).
+    measure : optional
+        The integral the closure is taken in: ``dx`` (the default) for a
+        cellwise stress; :func:`icepack_tools.spaces.vertex_measure`
+        collocates a nodal one at the vertices.
+    test_function : optional
+        Supplied by a caller that holds the test functions itself.
+    """
+    tau, u = map(kwargs.get, ("basal_stress", "velocity"))
+    sigma = _test(tau, kwargs)
+    tau_b = kwargs["traction"]
+    u_min = kwargs.get("speed_floor", 1.0)
+    measure = kwargs.get("measure", dx)
+    u_reg = sqrt(inner(u, u) + Constant(u_min) ** 2)
+    return inner(tau + tau_b * u / u_reg, sigma) * measure
+
+
 def friction_residual(tau, sigma, u, tau_b, u_min=U_MIN, measure=dx):
     r"""Close the dual basal stress: :math:`\tau = -\tau_b\,u/|u|_{\rm reg}`,
-    :func:`multilayer.model.variational.sliding_law` with this package's
-    traction magnitudes (:func:`basal_stress`).
+    :func:`sliding_law` with this package's traction magnitudes
+    (:func:`basal_stress`).
 
     Linear in ``tau``, so the basal-stress block of the Jacobian is the
     identity -- non-singular at ``tau = 0``, which is what makes a cold
     start possible.  ``measure`` is the integral the closure is taken in:
     ``dx`` for a cellwise stress, the vertex measure to collocate a nodal
-    one (:func:`multilayer.model.utilities.vertex_measure`).
+    one (:func:`icepack_tools.spaces.vertex_measure`).
     """
-    from multilayer.model.variational import sliding_law
     return sliding_law(basal_stress=tau, velocity=u, traction=tau_b,
                        speed_floor=u_min, measure=measure, test_function=sigma)
 

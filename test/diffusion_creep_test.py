@@ -56,9 +56,9 @@ def build(nx=8, Lx=40e3, Ly=12e3):
 
 def residual(A_lin_layers, phi_val=0.0, omit=False):
     """Assemble the multilayer residual at a fixed, non-zero state."""
-    from multilayer.model.utilities import create_function_space, layer_thicknesses
+    from icepack_tools.spaces import dual_function_space, layer_thicknesses
     mesh, Q, V, H, b, s, u_obs = build()
-    Z = create_function_space(mesh, len(FRACTIONS))
+    Z = dual_function_space(mesh, len(FRACTIONS))
     h_layers = layer_thicknesses(H, len(FRACTIONS), fractions=FRACTIONS)
     C_w0 = weertman_anchor(H, s, u_obs, M_SLIDE, Q)
     theta = Function(Q)
