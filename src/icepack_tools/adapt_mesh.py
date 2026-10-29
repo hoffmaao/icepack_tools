@@ -91,7 +91,6 @@ from firedrake import (
     dot,
     dS,
     ds,
-    dx,
     grad,
     inner,
     interpolate,

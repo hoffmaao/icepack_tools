@@ -10,7 +10,8 @@ continue in the sliding exponent.
 Modules
 -------
 constants   physical constants, re-exported from icepack2
-spaces      mixed dual function spaces, L >= 1 (L = 1 is single-layer)
+spaces      mixed dual function spaces, L >= 1 (L = 1 is single-layer),
+            and the vertex measure for nodal stresses
 geometry    CG1 lifting and a slope that works for CG1 or DG0 surfaces
 grounding   height above flotation, smooth grounded mask, effective pressure
 friction    Weertman/Budd/regularised-Coulomb basal stress, closed as

@@ -49,9 +49,18 @@ that residual.
 """
 
 from firedrake import (
-    Constant, conditional, eq, inner, tr, sym, grad, dx, max_value,
+    Constant, conditional, eq, inner, tr, sym, grad, dx, max_value, min_value,
 )
-from multilayer.model.variational import interlayer_stress_law
+
+from .spaces import _test
+
+#: Column thickness (m) below which the series weights of
+#: :func:`interlayer_stress_law` fade from the true thickness fractions to
+#: an equal share.  It is far below any thickness floor, so an empty layer
+#: has weight exactly zero wherever there is ice, and it keeps the weights
+#: summing to one at ice-free nodes, where the coefficient on the stress
+#: would otherwise vanish.
+SERIES_WEIGHT_THICKNESS = 1e-3
 
 #: Cross-over stress for stress-matching the linear regulariser [MPa].
 TAU_C = 0.1
@@ -200,16 +209,127 @@ def linear_compliance(A, n, *, A_lin=None, n_val=None, tau_c=TAU_C, alpha=ALPHA)
     return linear
 
 
+def _shear_compliance(S_2, A, n, linear=None):
+    r"""The scalar :math:`c(S)` of a shear closure :math:`c(S)\,S = \ldots`:
+    :math:`A|S|^{n-1}`, plus an optional :math:`n = 1` term in parallel
+    (a regulariser, diffusion creep)."""
+    S_n = conditional(eq(n, 1), Constant(1.0), S_2 ** ((n - 1) / 2))
+    c = A * S_n
+    if linear is not None:
+        c = c + linear
+    return c
+
+
+def interlayer_stress_law(**kwargs):
+    r"""Return the constitutive relation for interlayer shear stress, in
+    the keyword form of icepack2's variational functions
+
+    The dual form of the interlayer traction (Jouvet 2015, eq. 2.57) is
+
+    .. math::
+        A \lvert S^l \rvert^{n-1} S^l
+        = \frac{u^{l+1} - u^l}{h^{l+1} + h^l}
+
+    This has the same structure as a friction law with coefficient *A*
+    and exponent *n* applied to the normalised velocity jump between
+    adjacent layers.  It carries no regularisation of its own;
+    :func:`interlayer_residual` adds this package's.
+
+    With one law the whole jump is read with it -- by convention the law
+    of the layer *below* the interface.  Given the law of the layer above
+    as well (``flow_law_coefficient_above``, ``flow_law_exponent_above``)
+    the two half-layers meeting at the interface are put **in series**:
+    the shear stress is continuous across it, each half-layer shears under
+    its own law, and the jump between the layer centres is the sum of the
+    two,
+
+    .. math::
+        u^{l+1} - u^l = \left(h^l c_l(S) + h^{l+1} c_{l+1}(S)\right) S,
+        \qquad c(S) = A|S|^{n-1}
+
+    so, divided by :math:`h^l + h^{l+1}`, the closure above with the
+    compliance replaced by its thickness-weighted mean.  Two layers of one
+    law give exactly the single-law form; a layer that has thinned to
+    nothing has weight zero, so its rheology leaves no trace at the
+    interface, and the limit is reached continuously.  The weights are
+    the true thickness fractions wherever the column is at least
+    :data:`SERIES_WEIGHT_THICKNESS` thick, and fade to an equal share only
+    as the column vanishes, so they sum to one everywhere.
+
+    Parameters
+    ----------
+    interlayer_stress : UFL split variable
+        :math:`S^l`, the shear stress on the interface.
+    velocity_above, velocity_below : UFL split variables
+    thickness_above, thickness_below : UFL expressions
+    flow_law_coefficient, flow_law_exponent
+        The law that closes the interface (the layer below's).
+    flow_law_coefficient_above, flow_law_exponent_above : optional
+        The law of the layer above, for the series closure.
+    linear_coefficient, linear_coefficient_above : optional
+        An :math:`n = 1` term in parallel with each law -- a regulariser,
+        or diffusion creep -- added to :math:`A|S|^{n-1}`.
+    stress_regularization : float, optional
+        Added to :math:`|S|^2` inside the power, so the Jacobian of a law
+        with :math:`n < 3` stays finite at :math:`S = 0`.
+    thickness_floor : float, optional
+        Floor on :math:`h^l + h^{l+1}` in the velocity-jump normalisation,
+        which vanishes with the column and is zero at ice-free nodes.  The
+        series weights do not use it: they come from the true thicknesses,
+        so an empty layer has weight zero under the floor too.  The floor
+        is a dual-form device that a primal (power) form does not carry,
+        so the two forms agree wherever it does not engage.
+    measure : optional
+        The integral the closure is taken in: ``dx`` (the default) for a
+        cellwise stress; :func:`icepack_tools.spaces.vertex_measure`
+        collocates a nodal one at the vertices.
+    test_function : optional
+        Supplied by a caller that holds the test functions itself.
+    """
+    S = kwargs["interlayer_stress"]
+    sigma = _test(S, kwargs)
+    u_above = kwargs["velocity_above"]
+    u_below = kwargs["velocity_below"]
+    h_above = kwargs["thickness_above"]
+    h_below = kwargs["thickness_below"]
+    A, n = map(kwargs.get, ("flow_law_coefficient", "flow_law_exponent"))
+    A_above, n_above = map(kwargs.get, ("flow_law_coefficient_above",
+                                        "flow_law_exponent_above"))
+    linear, linear_above = map(kwargs.get, ("linear_coefficient",
+                                            "linear_coefficient_above"))
+    eps = kwargs.get("stress_regularization", 0.0)
+    floor = kwargs.get("thickness_floor", 0.0)
+    measure = kwargs.get("measure", dx)
+
+    h_total = h_above + h_below
+    h_sum = max_value(h_total, Constant(floor)) if floor else h_total
+    du = (u_above - u_below) / h_sum
+    S_2 = inner(S, S)
+    if eps:
+        S_2 = S_2 + Constant(eps)
+    c = _shear_compliance(S_2, A, n, linear)
+    if A_above is not None:
+        if n_above is None:
+            raise ValueError("a series interface needs flow_law_exponent_above "
+                             "with flow_law_coefficient_above")
+        delta = Constant(SERIES_WEIGHT_THICKNESS)
+        w_below = (h_below / max_value(h_total, delta)
+                   + Constant(0.5) * (Constant(1.0) - min_value(h_total, delta) / delta))
+        c = w_below * c + (Constant(1.0) - w_below) * _shear_compliance(
+            S_2, A_above, n_above, linear_above)
+    return inner(c * S - du, sigma) * measure
+
+
 def interlayer_residual(S, sigma, u_above, u_below, h_above, h_below, A, n,
                         *, A_lin=None, n_val=None, tau_c=TAU_C, alpha=ALPHA,
                         stress_eps=STRESS_EPS, h_jump_floor=H_JUMP_FLOOR,
                         A_above=None, n_above=None, n_val_above=None,
                         A_lin_above=None, measure=dx):
     r"""Interlayer shear closure with the same linear regularisation:
-    :func:`multilayer.model.variational.interlayer_stress_law` with this
-    package's regularised compliance.
+    :func:`interlayer_stress_law` with this package's regularised
+    compliance.
 
-    The multilayer interlayer stress obeys
+    The interlayer stress obeys
 
     .. math::
         \left(A|S|^{n-1} + \alpha A\tau_c^{\,n-1} + A_{\rm lin}\right) S
@@ -229,7 +349,7 @@ def interlayer_residual(S, sigma, u_above, u_below, h_above, h_below, A, n,
     convention the layer *below* the interface -- closes the whole jump.
     Given ``A_above``, ``n_above`` (and ``A_lin_above``) too, the two
     half-layers are put in series, each under its own law; see the
-    multilayer law for the form.  ``measure`` is the integral the closure
+    law (:func:`interlayer_stress_law`) for the form.  ``measure`` is the integral the closure
     is taken in: ``dx`` for a cellwise stress, the vertex measure to
     collocate a nodal one.
     """
